@@ -11,6 +11,8 @@ python -m PyInstaller `
   --windowed `
   --onedir `
   --name GPMLauncher `
+  --exclude-module PySide6 `
+  --exclude-module shiboken6 `
   --icon assets\gpm_launcher.ico `
   gpm_launcher.py
 

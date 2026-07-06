@@ -7,9 +7,10 @@ Windows launcher for the company GPM Curl applications.
 - Stores separate launch URLs for NRD, MEMORY, and NRDK.
 - Supports user-configurable global hotkeys.
 - Creates desktop shortcuts named `NRD GPM`, `MEM GPM`, and `NRDK GPM`.
-- Keeps the workspace session alive in the background before the 4-hour timeout.
+- Keeps the workspace session alive in the background before the 4-hour timeout, with a refresh interval adjustable in 1-minute steps.
 - Launches GPM directly from hotkeys and desktop shortcuts without opening the workspace first.
-- Runs from the Windows system tray and can start with Windows.
+- Uses a lightweight basic Windows GUI and can start with Windows.
+- Automatically extracts the `curl://launch/...` target when a workspace launch URL is pasted.
 
 ## Download
 
@@ -31,9 +32,10 @@ Requirements:
 
 - Windows
 - Python 3.11+
-- PySide6
 - Pillow
 - PyInstaller
+
+The GUI uses Tkinter from the Python standard library.
 
 Build command:
 

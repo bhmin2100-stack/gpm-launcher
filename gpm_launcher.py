@@ -7,36 +7,12 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import threading
 import time
+import tkinter as tk
+from tkinter import messagebox, ttk
 from urllib.parse import parse_qs, unquote, urlparse
 import winreg
-
-from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap
-from PySide6.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QComboBox,
-    QFormLayout,
-    QFrame,
-    QGridLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMenu,
-    QMessageBox,
-    QPushButton,
-    QScrollArea,
-    QSizePolicy,
-    QSpinBox,
-    QStatusBar,
-    QSystemTrayIcon,
-    QVBoxLayout,
-    QWidget,
-    QKeySequenceEdit,
-)
 
 
 APP_NAME = "GPM Launcher"
@@ -46,6 +22,7 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 LEGACY_CONFIG_PATH = Path(__file__).resolve().parent / "gpm-launcher.config.json"
 HOTKEY_BASE_ID = 0x4700
 WM_HOTKEY = 0x0312
+WM_QUIT = 0x0012
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
@@ -84,11 +61,18 @@ class MSG(ctypes.Structure):
 
 
 user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+shell32 = ctypes.windll.shell32
+
 user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
 user32.RegisterHotKey.restype = wintypes.BOOL
 user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.UnregisterHotKey.restype = wintypes.BOOL
-shell32 = ctypes.windll.shell32
+user32.GetMessageW.argtypes = [ctypes.POINTER(MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+user32.GetMessageW.restype = wintypes.BOOL
+user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostThreadMessageW.restype = wintypes.BOOL
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
 shell32.ShellExecuteW.restype = ctypes.c_void_p
 
@@ -117,40 +101,24 @@ def default_config() -> dict:
     }
 
 
-def normalize_mdm_url(value: str) -> str:
-    text = (value or "").strip()
-    if not text:
-        return ""
+def merge_config(target: dict, saved: dict) -> None:
+    for key in ("workspace_url", "browser", "warmup_seconds", "refresh_minutes", "refresh_enabled", "start_with_windows"):
+        if key in saved:
+            target[key] = saved[key]
 
-    lowered = text.lower()
-    if lowered.startswith("curl://launch/"):
-        return text
-
-    parsed = urlparse(text)
-    query = parse_qs(parsed.query)
-    if "next" in query and query["next"]:
-        return unquote(query["next"][0]).strip()
-
-    index = lowered.find("curl://launch/")
-    if index >= 0:
-        candidate = text[index:]
-        amp = candidate.find("&")
-        if amp >= 0:
-            candidate = candidate[:amp]
-        return unquote(candidate).strip()
-
-    if lowered.startswith(("http://", "https://")) and lowered.endswith((".dcurl", ".curl")):
-        return "curl://launch/" + text
-
-    return text
+    saved_mdm = saved.get("mdm", {})
+    if isinstance(saved_mdm, dict):
+        for env in ENVIRONMENTS:
+            env_key = env["key"]
+            if isinstance(saved_mdm.get(env_key), dict):
+                target["mdm"][env_key].update(saved_mdm[env_key])
 
 
 def load_config() -> dict:
     config = default_config()
     if CONFIG_PATH.exists():
         try:
-            saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            merge_config(config, saved)
+            merge_config(config, json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
         except Exception:
             pass
     elif LEGACY_CONFIG_PATH.exists():
@@ -167,31 +135,59 @@ def load_config() -> dict:
     return config
 
 
-def merge_config(target: dict, saved: dict) -> None:
-    for key in ("workspace_url", "browser", "warmup_seconds", "refresh_minutes", "refresh_enabled", "start_with_windows"):
-        if key in saved:
-            target[key] = saved[key]
-
-    saved_mdm = saved.get("mdm", {})
-    if isinstance(saved_mdm, dict):
-        for env in ENVIRONMENTS:
-            env_key = env["key"]
-            if env_key in saved_mdm and isinstance(saved_mdm[env_key], dict):
-                target["mdm"][env_key].update(saved_mdm[env_key])
-
-
 def save_config(config: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def show_windows_error(message: str) -> None:
-    ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)
+def normalize_mdm_url(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+
+    candidates = [text, unquote(text)]
+    for candidate in candidates:
+        if candidate.lower().startswith("curl://launch/"):
+            return candidate.strip()
+
+    for candidate in candidates:
+        try:
+            parsed = urlparse(candidate)
+            query = parse_qs(parsed.query)
+        except Exception:
+            query = {}
+        for key in ("next", "url", "target"):
+            values = query.get(key)
+            if values:
+                nested = normalize_mdm_url(values[0])
+                if nested.lower().startswith("curl://launch/"):
+                    return nested
+
+    for candidate in candidates:
+        match = re.search(r"curl://launch/[^\s\"'<>]+", candidate, flags=re.IGNORECASE)
+        if match:
+            found = match.group(0)
+            amp = found.find("&")
+            if amp >= 0:
+                found = found[:amp]
+            return found.strip()
+
+    lowered = text.lower()
+    if lowered.startswith(("http://", "https://")) and lowered.endswith((".dcurl", ".curl")):
+        return "curl://launch/" + text
+
+    return text
+
+
+def shell_open(target: str, show_command: int = SW_SHOWNORMAL) -> None:
+    result = shell32.ShellExecuteW(None, "open", target, None, None, show_command)
+    value = int(result or 0)
+    if value <= 32:
+        raise OSError(f"ShellExecute failed ({value}): {target}")
 
 
 def resolve_browser_path(browser: str) -> str | None:
     browser = (browser or "default").lower()
-    candidates: list[str] = []
     if browser == "edge":
         candidates = [
             rf"{os.environ.get('ProgramFiles(x86)', '')}\Microsoft\Edge\Application\msedge.exe",
@@ -204,6 +200,8 @@ def resolve_browser_path(browser: str) -> str | None:
             rf"{os.environ.get('ProgramFiles(x86)', '')}\Google\Chrome\Application\chrome.exe",
             rf"{os.environ.get('LOCALAPPDATA', '')}\Google\Chrome\Application\chrome.exe",
         ]
+    else:
+        candidates = []
 
     for candidate in candidates:
         if candidate and Path(candidate).exists():
@@ -216,14 +214,13 @@ def open_workspace(config: dict, minimized: bool = True) -> bool:
     if not url:
         return False
 
-    browser = (config.get("browser") or "default").lower()
-    browser_path = resolve_browser_path(browser)
+    browser_path = resolve_browser_path(config.get("browser") or "default")
     if browser_path:
         args = ["--new-window"]
         if minimized:
             args.append("--start-minimized")
         args.append(url)
-        subprocess.Popen(args=[browser_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen([browser_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
 
     shell_open(url, SW_SHOWMINNOACTIVE if minimized else SW_SHOWNORMAL)
@@ -237,25 +234,11 @@ def launch_mdm_url(url: str) -> None:
     shell_open(normalized, SW_SHOWNORMAL)
 
 
-def shell_open(target: str, show_command: int) -> None:
-    result = shell32.ShellExecuteW(None, "open", target, None, None, show_command)
-    value = int(result or 0)
-    if value <= 32:
-        raise OSError(f"ShellExecute failed ({value}): {target}")
-
-
-def launch_environment(config: dict, env_key: str, include_workspace: bool = False, wait: bool = True) -> None:
+def launch_environment(config: dict, env_key: str) -> None:
     env_config = config.get("mdm", {}).get(env_key, {})
     mdm_url = normalize_mdm_url(env_config.get("url", ""))
     if not mdm_url:
         raise ValueError(f"{env_key} MDM 주소가 비어 있습니다.")
-
-    if include_workspace and (config.get("workspace_url") or "").strip():
-        open_workspace(config, minimized=True)
-        delay = int(config.get("warmup_seconds", 7) or 0)
-        if delay > 0 and wait:
-            time.sleep(delay)
-
     launch_mdm_url(mdm_url)
 
 
@@ -280,12 +263,6 @@ def pythonw_path() -> str:
     return str(exe)
 
 
-def launch_command_for_env(env_key: str) -> tuple[str, str, str]:
-    if getattr(sys, "frozen", False):
-        return str(Path(sys.executable).resolve()), f"--launch {env_key}", str(app_base_dir())
-    return pythonw_path(), f'"{Path(__file__).resolve()}" --launch {env_key}', str(app_base_dir())
-
-
 def icon_location() -> str:
     if getattr(sys, "frozen", False):
         return str(Path(sys.executable).resolve())
@@ -293,6 +270,12 @@ def icon_location() -> str:
     if ico.exists():
         return str(ico)
     return str(Path(sys.executable).resolve())
+
+
+def launch_command_for_env(env_key: str) -> tuple[str, str, str]:
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable).resolve()), f"--launch {env_key}", str(app_base_dir())
+    return pythonw_path(), f'"{Path(__file__).resolve()}" --launch {env_key}', str(app_base_dir())
 
 
 def create_shortcut(shortcut_path: Path, target: str, arguments: str, working_dir: str, icon: str) -> None:
@@ -319,7 +302,7 @@ def create_shortcut(shortcut_path: Path, target: str, arguments: str, working_di
 def create_desktop_shortcuts() -> list[Path]:
     desktop = get_desktop_path()
     desktop.mkdir(parents=True, exist_ok=True)
-    created: list[Path] = []
+    created = []
     for env in ENVIRONMENTS:
         target, args, working_dir = launch_command_for_env(env["key"])
         shortcut = desktop / f"{env['shortcut']}.lnk"
@@ -354,49 +337,12 @@ def startup_enabled_now() -> bool:
         return False
 
 
-def hotkey_to_native(sequence: str) -> tuple[int, int]:
-    text = (sequence or "").strip()
-    if not text:
-        raise ValueError("단축키가 비어 있습니다.")
-
-    text = text.split(",", 1)[0].replace(" ", "")
-    parts = [part for part in text.split("+") if part]
-    if not parts:
-        raise ValueError("단축키가 비어 있습니다.")
-
-    modifiers = MOD_NOREPEAT
-    key_token = ""
-    for part in parts:
-        token = part.upper()
-        if token in ("CTRL", "CONTROL"):
-            modifiers |= MOD_CONTROL
-        elif token == "ALT":
-            modifiers |= MOD_ALT
-        elif token == "SHIFT":
-            modifiers |= MOD_SHIFT
-        elif token in ("META", "WIN", "WINDOWS"):
-            modifiers |= MOD_WIN
-        else:
-            key_token = token
-
-    if not key_token:
-        raise ValueError("단축키에 실행 키가 없습니다.")
-
-    vk = virtual_key_for_token(key_token)
-    if vk is None:
-        raise ValueError(f"지원하지 않는 키입니다: {key_token}")
-    if modifiers == MOD_NOREPEAT:
-        raise ValueError("Ctrl, Alt, Shift, Win 중 하나 이상을 같이 지정하세요.")
-    return modifiers, vk
-
-
 def virtual_key_for_token(token: str) -> int | None:
+    token = token.upper()
     if len(token) == 1 and ("A" <= token <= "Z" or "0" <= token <= "9"):
         return ord(token)
-
     if re.fullmatch(r"F([1-9]|1[0-9]|2[0-4])", token):
         return 0x6F + int(token[1:])
-
     special = {
         "SPACE": 0x20,
         "TAB": 0x09,
@@ -418,363 +364,313 @@ def virtual_key_for_token(token: str) -> int | None:
     return special.get(token)
 
 
-class HotkeyEventFilter(QAbstractNativeEventFilter):
-    def __init__(self, manager: "HotkeyManager") -> None:
-        super().__init__()
-        self.manager = manager
+def hotkey_to_native(sequence: str) -> tuple[int, int]:
+    text = (sequence or "").strip().replace(" ", "")
+    if not text:
+        raise ValueError("단축키가 비어 있습니다.")
 
-    def nativeEventFilter(self, event_type, message):
-        if event_type not in ("windows_generic_MSG", "windows_dispatcher_MSG"):
-            return False, 0
-        try:
-            msg = MSG.from_address(int(message))
-        except Exception:
-            return False, 0
-        if msg.message == WM_HOTKEY:
-            self.manager.handle_hotkey(int(msg.wParam))
-            return True, 0
-        return False, 0
-
-
-class HotkeyManager(QObject):
-    hotkey_pressed = Signal(str)
-
-    def __init__(self, sink: QWidget) -> None:
-        super().__init__()
-        self.sink = sink
-        self.hwnd = wintypes.HWND(int(sink.winId()))
-        self.registered: dict[int, str] = {}
-        self.filter = HotkeyEventFilter(self)
-        QCoreApplication.instance().installNativeEventFilter(self.filter)
-
-    def register_config(self, config: dict) -> list[str]:
-        self.unregister_all()
-        errors: list[str] = []
-        for index, env in enumerate(ENVIRONMENTS):
-            env_key = env["key"]
-            env_config = config.get("mdm", {}).get(env_key, {})
-            if not (env_config.get("url") or "").strip():
-                continue
-            hotkey = (env_config.get("hotkey") or "").strip()
-            if not hotkey:
-                continue
-            hotkey_id = HOTKEY_BASE_ID + index
-            try:
-                modifiers, vk = hotkey_to_native(hotkey)
-            except ValueError as exc:
-                errors.append(f"{env['label']}: {exc}")
-                continue
-            if user32.RegisterHotKey(self.hwnd, hotkey_id, modifiers, vk):
-                self.registered[hotkey_id] = env_key
-            else:
-                errors.append(f"{env['label']}: 단축키 등록 실패 ({hotkey})")
-        return errors
-
-    def unregister_all(self) -> None:
-        for hotkey_id in list(self.registered):
-            user32.UnregisterHotKey(self.hwnd, hotkey_id)
-        self.registered.clear()
-
-    def handle_hotkey(self, hotkey_id: int) -> None:
-        env_key = self.registered.get(hotkey_id)
-        if env_key:
-            self.hotkey_pressed.emit(env_key)
-
-
-def make_app_icon() -> QIcon:
-    pixmap = QPixmap(128, 128)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    painter.setBrush(QColor("#1b5eaa"))
-    painter.setPen(Qt.NoPen)
-    painter.drawRoundedRect(8, 8, 112, 112, 22, 22)
-    painter.setBrush(QColor("#28a36a"))
-    painter.drawRect(8, 82, 112, 38)
-    painter.setPen(QColor("white"))
-    font = QFont("Segoe UI", 46, QFont.Bold)
-    painter.setFont(font)
-    painter.drawText(pixmap.rect(), Qt.AlignCenter, "G")
-    painter.end()
-    return QIcon(pixmap)
-
-
-class MainWindow(QMainWindow):
-    def __init__(self, start_minimized: bool = False) -> None:
-        super().__init__()
-        self.config = load_config()
-        self.icon = make_app_icon()
-        self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(self.icon)
-        self.resize(900, 680)
-        self.setMinimumSize(820, 560)
-        self.env_widgets: dict[str, dict[str, object]] = {}
-        self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self.refresh_workspace)
-        self.pending_launch_timers: list[QTimer] = []
-
-        self.hotkey_sink = QWidget()
-        self.hotkey_sink.setAttribute(Qt.WA_NativeWindow, True)
-        self.hotkey_manager = HotkeyManager(self.hotkey_sink)
-        self.hotkey_manager.hotkey_pressed.connect(self.launch_env_from_hotkey)
-
-        self.build_ui()
-        self.build_tray()
-        self.load_into_ui()
-        self.apply_runtime_settings(show_errors=False)
-
-        if start_minimized:
-            self.hide()
-            if self.config.get("refresh_enabled", True):
-                QTimer.singleShot(2500, self.refresh_workspace)
+    parts = [part for part in text.split("+") if part]
+    modifiers = MOD_NOREPEAT
+    key_token = ""
+    for part in parts:
+        token = part.upper()
+        if token in ("CTRL", "CONTROL"):
+            modifiers |= MOD_CONTROL
+        elif token == "ALT":
+            modifiers |= MOD_ALT
+        elif token == "SHIFT":
+            modifiers |= MOD_SHIFT
+        elif token in ("WIN", "WINDOWS", "META"):
+            modifiers |= MOD_WIN
         else:
-            self.show()
+            key_token = token
 
-    def build_ui(self) -> None:
-        central = QWidget()
-        root = QVBoxLayout(central)
-        root.setContentsMargins(18, 18, 18, 12)
-        root.setSpacing(14)
+    if not key_token:
+        raise ValueError("실행 키가 없습니다.")
+    vk = virtual_key_for_token(key_token)
+    if vk is None:
+        raise ValueError(f"지원하지 않는 키입니다: {key_token}")
+    if modifiers == MOD_NOREPEAT:
+        raise ValueError("Ctrl, Alt, Shift, Win 중 하나 이상을 같이 지정하세요.")
+    return modifiers, vk
 
-        title = QLabel("GPM Launcher")
-        title.setObjectName("title")
-        subtitle = QLabel("NRD, MEMORY, NRDK 접속 주소와 전역 단축키를 관리합니다.")
-        subtitle.setObjectName("subtitle")
-        root.addWidget(title)
-        root.addWidget(subtitle)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        content = QWidget()
-        body = QVBoxLayout(content)
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(14)
+class HotkeyService:
+    def __init__(self, config: dict, on_hotkey, on_errors) -> None:
+        self.config = config
+        self.on_hotkey = on_hotkey
+        self.on_errors = on_errors
+        self.thread: threading.Thread | None = None
+        self.thread_id: int | None = None
+        self.ready = threading.Event()
+        self.stopping = threading.Event()
 
-        body.addWidget(self.workspace_group())
-        body.addWidget(self.mdm_group())
-        body.addWidget(self.actions_group())
-        body.addStretch(1)
-        scroll.setWidget(content)
-        root.addWidget(scroll, 1)
+    def start(self) -> None:
+        self.thread = threading.Thread(target=self._run, name="GPMHotkeys", daemon=True)
+        self.thread.start()
+        self.ready.wait(timeout=2)
 
-        buttons = QHBoxLayout()
-        self.save_button = QPushButton("저장 / 적용")
-        self.save_button.clicked.connect(self.save_from_ui)
-        self.hide_button = QPushButton("트레이로 숨기기")
-        self.hide_button.clicked.connect(self.hide_to_tray)
-        self.quit_button = QPushButton("종료")
-        self.quit_button.clicked.connect(self.quit_app)
-        buttons.addStretch(1)
-        buttons.addWidget(self.save_button)
-        buttons.addWidget(self.hide_button)
-        buttons.addWidget(self.quit_button)
-        root.addLayout(buttons)
+    def stop(self) -> None:
+        self.stopping.set()
+        if self.thread_id:
+            user32.PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0)
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2)
 
-        self.setCentralWidget(central)
-        self.setStatusBar(QStatusBar())
-        self.apply_style()
+    def _run(self) -> None:
+        self.thread_id = int(kernel32.GetCurrentThreadId())
+        registered: dict[int, str] = {}
+        errors = []
+        try:
+            for index, env in enumerate(ENVIRONMENTS):
+                env_key = env["key"]
+                env_config = self.config.get("mdm", {}).get(env_key, {})
+                if not (env_config.get("url") or "").strip():
+                    continue
+                hotkey = (env_config.get("hotkey") or "").strip()
+                if not hotkey:
+                    continue
+                try:
+                    modifiers, vk = hotkey_to_native(hotkey)
+                except ValueError as exc:
+                    errors.append(f"{env['label']}: {exc}")
+                    continue
+                hotkey_id = HOTKEY_BASE_ID + index
+                if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
+                    registered[hotkey_id] = env_key
+                else:
+                    errors.append(f"{env['label']}: 단축키 등록 실패 ({hotkey})")
 
-    def workspace_group(self) -> QGroupBox:
-        group = QGroupBox("Workspace")
-        layout = QFormLayout(group)
-        layout.setLabelAlignment(Qt.AlignRight)
-        layout.setFormAlignment(Qt.AlignTop)
-        layout.setHorizontalSpacing(12)
-        layout.setVerticalSpacing(10)
+            if errors:
+                self.on_errors(errors)
+            self.ready.set()
 
-        self.workspace_edit = QLineEdit()
-        self.workspace_edit.setPlaceholderText("https://workspace...")
-        self.browser_combo = QComboBox()
-        self.browser_combo.addItem("Microsoft Edge", "edge")
-        self.browser_combo.addItem("Google Chrome", "chrome")
-        self.browser_combo.addItem("기본 브라우저", "default")
+            msg = MSG()
+            while not self.stopping.is_set() and user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+                if msg.message == WM_HOTKEY:
+                    env_key = registered.get(int(msg.wParam))
+                    if env_key:
+                        self.on_hotkey(env_key)
+        finally:
+            for hotkey_id in registered:
+                user32.UnregisterHotKey(None, hotkey_id)
+            self.ready.set()
 
-        self.refresh_enabled_check = QCheckBox("자동 갱신")
-        self.refresh_minutes_spin = QSpinBox()
-        self.refresh_minutes_spin.setRange(15, 720)
-        self.refresh_minutes_spin.setSuffix("분")
-        self.refresh_minutes_spin.setSingleStep(15)
-        self.warmup_seconds_spin = QSpinBox()
-        self.warmup_seconds_spin.setRange(0, 60)
-        self.warmup_seconds_spin.setSuffix("초")
 
-        refresh_row = QHBoxLayout()
-        refresh_row.addWidget(self.refresh_enabled_check)
-        refresh_row.addWidget(self.refresh_minutes_spin)
-        refresh_row.addStretch(1)
+class LauncherApp:
+    def __init__(self, background: bool = False) -> None:
+        self.root = tk.Tk()
+        self.root.title(APP_NAME)
+        self.root.geometry("760x520")
+        self.root.minsize(700, 480)
+        ico = app_base_dir() / "assets" / "gpm_launcher.ico"
+        if ico.exists():
+            try:
+                self.root.iconbitmap(str(ico))
+            except tk.TclError:
+                pass
 
-        self.startup_check = QCheckBox("Windows 시작 시 백그라운드 실행")
+        self.config = load_config()
+        self.hotkey_service: HotkeyService | None = None
+        self.refresh_after_id: str | None = None
+        self.url_vars: dict[str, tk.StringVar] = {}
+        self.hotkey_vars: dict[str, tk.StringVar] = {}
 
-        self.refresh_now_button = QPushButton("Workspace 갱신")
-        self.refresh_now_button.clicked.connect(self.refresh_workspace_from_ui)
-        self.open_workspace_button = QPushButton("Workspace 열기")
-        self.open_workspace_button.clicked.connect(self.open_workspace_visible)
-        workspace_buttons = QHBoxLayout()
-        workspace_buttons.addWidget(self.refresh_now_button)
-        workspace_buttons.addWidget(self.open_workspace_button)
-        workspace_buttons.addStretch(1)
+        self._build_ui()
+        self._load_config_to_ui()
+        self.apply_runtime_settings(show_errors=False)
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
-        layout.addRow("주소", self.workspace_edit)
-        layout.addRow("브라우저", self.browser_combo)
-        layout.addRow("갱신 간격", refresh_row)
-        layout.addRow("", self.startup_check)
-        layout.addRow("", workspace_buttons)
-        return group
+        if background:
+            self.root.withdraw()
+            if self.config.get("refresh_enabled", True):
+                self.root.after(2500, lambda: self.refresh_workspace(show_status=False))
 
-    def mdm_group(self) -> QGroupBox:
-        group = QGroupBox("MDM")
-        grid = QGridLayout(group)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(8)
-        grid.addWidget(QLabel("구분"), 0, 0)
-        grid.addWidget(QLabel("MDM 주소"), 0, 1)
-        grid.addWidget(QLabel("단축키"), 0, 2)
-        grid.addWidget(QLabel("실행"), 0, 3)
-        grid.setColumnStretch(1, 1)
+    def _build_ui(self) -> None:
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        outer = ttk.Frame(self.root, padding=12)
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
+
+        title = ttk.Label(outer, text="GPM Launcher", font=("Segoe UI", 16, "bold"))
+        title.grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+        body = ttk.Frame(outer)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
+
+        self._build_workspace_frame(body)
+        self._build_mdm_frame(body)
+        self._build_button_row(outer)
+
+        self.status_var = tk.StringVar(value="준비됨")
+        status = ttk.Label(outer, textvariable=self.status_var, anchor="w")
+        status.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+
+    def _build_workspace_frame(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text="Workspace", padding=10)
+        frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        frame.columnconfigure(1, weight=1)
+
+        self.workspace_var = tk.StringVar()
+        self.browser_var = tk.StringVar(value="default")
+        self.refresh_enabled_var = tk.BooleanVar(value=True)
+        self.refresh_minutes_var = tk.IntVar(value=210)
+        self.startup_var = tk.BooleanVar(value=True)
+
+        ttk.Label(frame, text="주소").grid(row=0, column=0, sticky="e", padx=(0, 8), pady=3)
+        ttk.Entry(frame, textvariable=self.workspace_var).grid(row=0, column=1, sticky="ew", pady=3)
+
+        ttk.Label(frame, text="브라우저").grid(row=1, column=0, sticky="e", padx=(0, 8), pady=3)
+        browser = ttk.Combobox(frame, textvariable=self.browser_var, values=("default", "edge", "chrome"), state="readonly", width=12)
+        browser.grid(row=1, column=1, sticky="w", pady=3)
+
+        ttk.Label(frame, text="리프레시").grid(row=2, column=0, sticky="e", padx=(0, 8), pady=3)
+        refresh_row = ttk.Frame(frame)
+        refresh_row.grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Checkbutton(refresh_row, text="자동", variable=self.refresh_enabled_var).pack(side="left")
+        tk.Spinbox(refresh_row, from_=1, to=720, increment=1, width=6, textvariable=self.refresh_minutes_var).pack(side="left", padx=(10, 4))
+        ttk.Label(refresh_row, text="분").pack(side="left")
+        ttk.Button(refresh_row, text="지금 갱신", command=self.refresh_workspace_from_ui).pack(side="left", padx=(12, 0))
+        ttk.Button(refresh_row, text="Workspace 열기", command=self.open_workspace_visible).pack(side="left", padx=(6, 0))
+
+        ttk.Checkbutton(frame, text="Windows 시작 시 백그라운드 실행", variable=self.startup_var).grid(row=3, column=1, sticky="w", pady=3)
+
+    def _build_mdm_frame(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text="GPM", padding=10)
+        frame.grid(row=1, column=0, sticky="nsew")
+        frame.columnconfigure(1, weight=1)
+
+        ttk.Label(frame, text="구분").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(frame, text="MDM 주소").grid(row=0, column=1, sticky="w")
+        ttk.Label(frame, text="단축키").grid(row=0, column=2, sticky="w", padx=(8, 0))
 
         for row, env in enumerate(ENVIRONMENTS, start=1):
-            label = QLabel(env["label"])
-            url_edit = QLineEdit()
-            url_edit.setPlaceholderText("curl://launch/... 또는 .../start.dcurl")
-            hotkey_edit = QKeySequenceEdit()
-            try:
-                hotkey_edit.setMaximumSequenceLength(1)
-            except AttributeError:
-                pass
-            launch_button = QPushButton("실행")
-            launch_button.clicked.connect(lambda checked=False, key=env["key"]: self.launch_env_from_ui(key))
-            grid.addWidget(label, row, 0)
-            grid.addWidget(url_edit, row, 1)
-            grid.addWidget(hotkey_edit, row, 2)
-            grid.addWidget(launch_button, row, 3)
-            self.env_widgets[env["key"]] = {
-                "url": url_edit,
-                "hotkey": hotkey_edit,
-                "launch": launch_button,
-            }
-        return group
+            env_key = env["key"]
+            self.url_vars[env_key] = tk.StringVar()
+            self.hotkey_vars[env_key] = tk.StringVar()
 
-    def actions_group(self) -> QGroupBox:
-        group = QGroupBox("Icons")
-        layout = QHBoxLayout(group)
-        self.create_icons_button = QPushButton("바탕화면 아이콘 생성")
-        self.create_icons_button.clicked.connect(self.create_icons)
-        layout.addWidget(self.create_icons_button)
-        layout.addStretch(1)
-        return group
+            ttk.Label(frame, text=env["label"]).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=5)
+            entry = ttk.Entry(frame, textvariable=self.url_vars[env_key])
+            entry.grid(row=row, column=1, sticky="ew", pady=5)
+            self._bind_auto_normalize(entry, self.url_vars[env_key])
+            ttk.Entry(frame, textvariable=self.hotkey_vars[env_key], width=16).grid(row=row, column=2, sticky="w", padx=(8, 0), pady=5)
+            ttk.Button(frame, text="실행", command=lambda key=env_key: self.launch_env_from_ui(key)).grid(row=row, column=3, sticky="w", padx=(8, 0), pady=5)
 
-    def build_tray(self) -> None:
-        self.tray = QSystemTrayIcon(self.icon, self)
-        menu = QMenu()
-        show_action = QAction("설정 열기", self)
-        show_action.triggered.connect(self.show_window)
-        menu.addAction(show_action)
-        menu.addSeparator()
-        for env in ENVIRONMENTS:
-            action = QAction(f"{env['label']} 실행", self)
-            action.triggered.connect(lambda checked=False, key=env["key"]: self.launch_env_from_hotkey(key))
-            menu.addAction(action)
-        menu.addSeparator()
-        refresh_action = QAction("Workspace 갱신", self)
-        refresh_action.triggered.connect(self.refresh_workspace)
-        quit_action = QAction("종료", self)
-        quit_action.triggered.connect(self.quit_app)
-        menu.addAction(refresh_action)
-        menu.addAction(quit_action)
-        self.tray.setContextMenu(menu)
-        self.tray.activated.connect(self.on_tray_activated)
-        self.tray.show()
+        hint = ttk.Label(frame, text="GPM 임시 주소나 curl://launch/... 주소를 붙여넣으면 자동으로 실행 주소만 정리합니다.", foreground="#555")
+        hint.grid(row=len(ENVIRONMENTS) + 1, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
-    def apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow, QWidget { background: #f6f7f9; color: #20242a; font-family: "Segoe UI"; font-size: 10pt; }
-            QLabel#title { font-size: 22pt; font-weight: 700; color: #12233a; }
-            QLabel#subtitle { color: #586172; margin-bottom: 6px; }
-            QGroupBox { background: #ffffff; border: 1px solid #d8dde5; border-radius: 8px; margin-top: 12px; padding: 16px 12px 12px 12px; font-weight: 600; }
-            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; color: #243247; }
-            QLineEdit, QComboBox, QSpinBox, QKeySequenceEdit { background: white; border: 1px solid #c8cfda; border-radius: 5px; min-height: 28px; padding: 2px 6px; }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QKeySequenceEdit:focus { border-color: #1b5eaa; }
-            QPushButton { background: #1b5eaa; color: white; border: 0; border-radius: 5px; padding: 7px 13px; min-height: 26px; }
-            QPushButton:hover { background: #174f91; }
-            QPushButton:pressed { background: #123f76; }
-            QPushButton#secondary { background: #657083; }
-            QCheckBox { spacing: 8px; }
-            """
-        )
+    def _build_button_row(self, parent: ttk.Frame) -> None:
+        row = ttk.Frame(parent)
+        row.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        row.columnconfigure(0, weight=1)
+        ttk.Button(row, text="저장 / 적용", command=self.save_from_ui).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(row, text="바탕화면 아이콘 생성", command=self.create_icons).grid(row=0, column=2, padx=(0, 6))
+        ttk.Button(row, text="숨기기", command=self.root.withdraw).grid(row=0, column=3, padx=(0, 6))
+        ttk.Button(row, text="종료", command=self.quit).grid(row=0, column=4)
 
-    def load_into_ui(self) -> None:
-        config = self.config
-        self.workspace_edit.setText(config.get("workspace_url", ""))
-        browser = (config.get("browser") or "default").lower()
-        index = self.browser_combo.findData(browser)
-        self.browser_combo.setCurrentIndex(index if index >= 0 else 0)
-        self.refresh_enabled_check.setChecked(bool(config.get("refresh_enabled", True)))
-        self.refresh_minutes_spin.setValue(int(config.get("refresh_minutes", 210) or 210))
-        self.warmup_seconds_spin.setValue(int(config.get("warmup_seconds", 7) or 7))
-        self.startup_check.setChecked(bool(config.get("start_with_windows", True)) or startup_enabled_now())
+    def _bind_auto_normalize(self, entry: ttk.Entry, var: tk.StringVar) -> None:
+        def normalize_later(_event=None) -> None:
+            self.root.after(80, lambda: self._normalize_var(var))
+
+        entry.bind("<<Paste>>", normalize_later)
+        entry.bind("<Control-v>", normalize_later)
+        entry.bind("<FocusOut>", normalize_later)
+
+    def _normalize_var(self, var: tk.StringVar) -> None:
+        before = var.get()
+        after = normalize_mdm_url(before)
+        if after != before:
+            var.set(after)
+            self.set_status("주소를 curl 실행 주소로 정리했습니다.")
+
+    def _load_config_to_ui(self) -> None:
+        self.workspace_var.set(self.config.get("workspace_url", ""))
+        self.browser_var.set(self.config.get("browser", "default") or "default")
+        self.refresh_enabled_var.set(bool(self.config.get("refresh_enabled", True)))
+        self.refresh_minutes_var.set(max(1, int(self.config.get("refresh_minutes", 210) or 210)))
+        self.startup_var.set(bool(self.config.get("start_with_windows", True)) or startup_enabled_now())
 
         for env in ENVIRONMENTS:
             env_key = env["key"]
-            env_config = config.get("mdm", {}).get(env_key, {})
-            widgets = self.env_widgets[env_key]
-            widgets["url"].setText(env_config.get("url", ""))  # type: ignore[attr-defined]
-            hotkey = env_config.get("hotkey", DEFAULT_HOTKEYS[env_key])
-            widgets["hotkey"].setKeySequence(QKeySequence(hotkey))  # type: ignore[attr-defined]
+            env_config = self.config.get("mdm", {}).get(env_key, {})
+            self.url_vars[env_key].set(env_config.get("url", ""))
+            self.hotkey_vars[env_key].set(env_config.get("hotkey", DEFAULT_HOTKEYS[env_key]))
 
     def read_from_ui(self) -> dict:
         config = default_config()
-        config["workspace_url"] = self.workspace_edit.text().strip()
-        config["browser"] = self.browser_combo.currentData()
-        config["refresh_enabled"] = self.refresh_enabled_check.isChecked()
-        config["refresh_minutes"] = self.refresh_minutes_spin.value()
-        config["warmup_seconds"] = self.warmup_seconds_spin.value()
-        config["start_with_windows"] = self.startup_check.isChecked()
+        config["workspace_url"] = self.workspace_var.get().strip()
+        config["browser"] = self.browser_var.get().strip() or "default"
+        config["refresh_enabled"] = bool(self.refresh_enabled_var.get())
+        config["refresh_minutes"] = max(1, int(self.refresh_minutes_var.get() or 1))
+        config["start_with_windows"] = bool(self.startup_var.get())
 
         for env in ENVIRONMENTS:
             env_key = env["key"]
-            widgets = self.env_widgets[env_key]
-            hotkey_sequence = widgets["hotkey"].keySequence().toString(QKeySequence.NativeText)  # type: ignore[attr-defined]
-            config["mdm"][env_key]["url"] = normalize_mdm_url(widgets["url"].text())  # type: ignore[attr-defined]
-            config["mdm"][env_key]["hotkey"] = hotkey_sequence
+            normalized = normalize_mdm_url(self.url_vars[env_key].get())
+            self.url_vars[env_key].set(normalized)
+            config["mdm"][env_key]["url"] = normalized
+            config["mdm"][env_key]["hotkey"] = self.hotkey_vars[env_key].get().strip()
         return config
 
-    def save_from_ui(self) -> None:
+    def save_from_ui(self, silent: bool = False) -> None:
         self.config = self.read_from_ui()
         save_config(self.config)
         try:
             set_startup(bool(self.config.get("start_with_windows", True)))
         except Exception as exc:
-            QMessageBox.warning(self, APP_NAME, f"Windows 시작 등록 실패:\n{exc}")
-        self.apply_runtime_settings(show_errors=True)
-        self.statusBar().showMessage("저장했습니다.", 4000)
+            messagebox.showwarning(APP_NAME, f"Windows 시작 등록 실패:\n{exc}")
+        self.apply_runtime_settings(show_errors=not silent)
+        if not silent:
+            self.set_status("저장했습니다.")
 
     def apply_runtime_settings(self, show_errors: bool) -> None:
-        errors = self.hotkey_manager.register_config(self.config)
-        if errors and show_errors:
-            QMessageBox.warning(self, APP_NAME, "단축키 등록 확인:\n" + "\n".join(errors))
         self.configure_refresh_timer()
+        self.restart_hotkeys(show_errors=show_errors)
 
     def configure_refresh_timer(self) -> None:
-        self.refresh_timer.stop()
+        if self.refresh_after_id:
+            self.root.after_cancel(self.refresh_after_id)
+            self.refresh_after_id = None
         if not self.config.get("refresh_enabled", True):
             return
         if not (self.config.get("workspace_url") or "").strip():
             return
-        minutes = max(15, int(self.config.get("refresh_minutes", 210) or 210))
-        self.refresh_timer.start(minutes * 60 * 1000)
+        minutes = max(1, int(self.config.get("refresh_minutes", 210) or 210))
+        self.refresh_after_id = self.root.after(minutes * 60 * 1000, self.refresh_workspace_timer)
+
+    def refresh_workspace_timer(self) -> None:
+        self.refresh_workspace(show_status=False)
+        self.configure_refresh_timer()
+
+    def restart_hotkeys(self, show_errors: bool) -> None:
+        if self.hotkey_service:
+            self.hotkey_service.stop()
+        self.hotkey_service = HotkeyService(
+            self.config,
+            on_hotkey=lambda key: self.root.after(0, lambda: self.launch_env(key)),
+            on_errors=lambda errors: self.root.after(0, lambda: self.handle_hotkey_errors(errors, show_errors)),
+        )
+        self.hotkey_service.start()
+
+    def handle_hotkey_errors(self, errors: list[str], show_errors: bool) -> None:
+        self.set_status("일부 단축키를 등록하지 못했습니다.")
+        if show_errors:
+            messagebox.showwarning(APP_NAME, "단축키 확인:\n" + "\n".join(errors))
 
     def refresh_workspace(self, show_status: bool = True) -> None:
         try:
             if open_workspace(self.config, minimized=True):
                 if show_status:
-                    self.statusBar().showMessage("Workspace 갱신 요청을 보냈습니다.", 4000)
+                    self.set_status("Workspace 갱신 요청을 보냈습니다.")
             elif show_status:
-                self.statusBar().showMessage("Workspace 주소가 비어 있습니다.", 4000)
+                self.set_status("Workspace 주소가 비어 있습니다.")
         except Exception as exc:
-            if self.isVisible():
-                QMessageBox.warning(self, APP_NAME, f"Workspace 갱신 실패:\n{exc}")
+            if show_status:
+                messagebox.showwarning(APP_NAME, f"Workspace 갱신 실패:\n{exc}")
 
     def refresh_workspace_from_ui(self) -> None:
         self.config = self.read_from_ui()
@@ -784,80 +680,51 @@ class MainWindow(QMainWindow):
         self.config = self.read_from_ui()
         try:
             if open_workspace(self.config, minimized=False):
-                self.statusBar().showMessage("Workspace를 열었습니다.", 4000)
+                self.set_status("Workspace를 열었습니다.")
             else:
-                self.statusBar().showMessage("Workspace 주소가 비어 있습니다.", 4000)
+                self.set_status("Workspace 주소가 비어 있습니다.")
         except Exception as exc:
-            QMessageBox.warning(self, APP_NAME, f"Workspace 열기 실패:\n{exc}")
+            messagebox.showwarning(APP_NAME, f"Workspace 열기 실패:\n{exc}")
 
     def launch_env_from_ui(self, env_key: str) -> None:
-        self.config = self.read_from_ui()
-        save_config(self.config)
-        self.launch_env_async(env_key)
+        self.save_from_ui(silent=True)
+        self.launch_env(env_key)
 
-    def launch_env_from_hotkey(self, env_key: str) -> None:
-        self.launch_env_async(env_key)
-
-    def launch_env_async(self, env_key: str) -> None:
+    def launch_env(self, env_key: str) -> None:
         try:
-            env_config = self.config.get("mdm", {}).get(env_key, {})
-            mdm_url = normalize_mdm_url(env_config.get("url", ""))
-            if not mdm_url:
-                raise ValueError(f"{env_key} MDM 주소가 비어 있습니다.")
-
-            launch_mdm_url(mdm_url)
+            launch_environment(self.config, env_key)
             label = next(env["label"] for env in ENVIRONMENTS if env["key"] == env_key)
-            self.statusBar().showMessage(f"{label} 실행 요청을 보냈습니다.", 4000)
+            self.set_status(f"{label} 실행 요청을 보냈습니다.")
         except Exception as exc:
-            if self.isVisible():
-                QMessageBox.warning(self, APP_NAME, str(exc))
-            else:
-                self.tray.showMessage(APP_NAME, str(exc), QSystemTrayIcon.Warning, 4000)
-
-    def finish_delayed_launch(self, url: str, timer: QTimer) -> None:
-        try:
-            launch_mdm_url(url)
-        except Exception as exc:
-            if self.isVisible():
-                QMessageBox.warning(self, APP_NAME, f"GPM 실행 실패:\n{exc}")
-            else:
-                self.tray.showMessage(APP_NAME, f"GPM 실행 실패: {exc}", QSystemTrayIcon.Warning, 4000)
-        finally:
-            if timer in self.pending_launch_timers:
-                self.pending_launch_timers.remove(timer)
-            timer.deleteLater()
+            messagebox.showwarning(APP_NAME, str(exc))
 
     def create_icons(self) -> None:
-        self.config = self.read_from_ui()
-        save_config(self.config)
+        self.save_from_ui(silent=True)
         try:
             created = create_desktop_shortcuts()
             names = "\n".join(path.name for path in created)
-            QMessageBox.information(self, APP_NAME, f"바탕화면 아이콘을 만들었습니다.\n\n{names}")
+            messagebox.showinfo(APP_NAME, f"바탕화면 아이콘을 만들었습니다.\n\n{names}")
+            self.set_status("바탕화면 아이콘을 만들었습니다.")
         except Exception as exc:
-            QMessageBox.warning(self, APP_NAME, f"아이콘 생성 실패:\n{exc}")
+            messagebox.showwarning(APP_NAME, f"아이콘 생성 실패:\n{exc}")
 
-    def hide_to_tray(self) -> None:
-        self.hide()
-        self.tray.showMessage(APP_NAME, "백그라운드에서 실행 중입니다.", QSystemTrayIcon.Information, 2500)
+    def set_status(self, text: str) -> None:
+        self.status_var.set(text)
 
-    def show_window(self) -> None:
-        self.showNormal()
-        self.raise_()
-        self.activateWindow()
+    def quit(self) -> None:
+        if self.refresh_after_id:
+            self.root.after_cancel(self.refresh_after_id)
+        if self.hotkey_service:
+            self.hotkey_service.stop()
+        self.root.destroy()
 
-    def on_tray_activated(self, reason) -> None:
-        if reason == QSystemTrayIcon.Trigger:
-            self.show_window()
+    def run(self) -> int:
+        self.root.mainloop()
+        return 0
 
-    def closeEvent(self, event) -> None:
-        event.ignore()
-        self.hide_to_tray()
 
-    def quit_app(self) -> None:
-        self.hotkey_manager.unregister_all()
-        self.tray.hide()
-        QApplication.quit()
+def show_windows_error(message: str) -> None:
+    ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)
 
 
 def run_cli(args: argparse.Namespace) -> int:
@@ -873,7 +740,7 @@ def run_cli(args: argparse.Namespace) -> int:
             allowed = {env["key"] for env in ENVIRONMENTS}
             if env_key not in allowed:
                 raise ValueError(f"Unknown environment: {args.launch}")
-            launch_environment(config, env_key, include_workspace=False, wait=True)
+            launch_environment(config, env_key)
             return 0
     except Exception as exc:
         show_windows_error(str(exc))
@@ -885,22 +752,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=APP_NAME)
     parser.add_argument("--launch", choices=["NRD", "MEM", "MEMORY", "NRDK", "nrd", "mem", "memory", "nrdk"], help="Launch a configured GPM environment.")
     parser.add_argument("--refresh-only", action="store_true", help="Refresh workspace session and exit.")
-    parser.add_argument("--background", action="store_true", help="Start minimized to tray.")
+    parser.add_argument("--background", action="store_true", help="Start hidden in the background.")
     return parser
 
 
 def main() -> int:
-    parser = build_arg_parser()
-    args = parser.parse_args()
+    args = build_arg_parser().parse_args()
     if args.launch or args.refresh_only:
         return run_cli(args)
-
-    app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName(APP_NAME)
-    app.setWindowIcon(make_app_icon())
-    window = MainWindow(start_minimized=args.background)
-    return app.exec()
+    return LauncherApp(background=args.background).run()
 
 
 if __name__ == "__main__":
