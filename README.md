@@ -5,9 +5,10 @@ Windows launcher for the company GPM Curl applications.
 ## Features
 
 - Stores separate launch URLs for NRD, MEMORY, and NRDK.
-- Supports user-configurable global hotkeys.
+- Supports user-configurable global hotkeys. Defaults are `Ctrl+Alt+Shift+N`, `Ctrl+Alt+Shift+M`, and `Ctrl+Alt+Shift+K`.
 - Creates desktop shortcuts named `NRD GPM`, `MEM GPM`, and `NRDK GPM`.
-- Keeps the workspace session alive in the background before the 4-hour timeout, with a refresh interval adjustable in 1-minute steps.
+- Keeps the workspace session alive before the 4-hour timeout, with a refresh interval adjustable in 1-minute steps.
+- Opens the workspace refresh window briefly and closes it automatically after the configured number of seconds.
 - Launches GPM directly from hotkeys and desktop shortcuts without opening the workspace first.
 - Uses a lightweight basic Windows GUI and can start with Windows.
 - Automatically extracts the `curl://launch/...` target when a workspace launch URL is pasted.

@@ -39,6 +39,12 @@ ENVIRONMENTS = [
 ]
 
 DEFAULT_HOTKEYS = {
+    "NRD": "Ctrl+Alt+Shift+N",
+    "MEMORY": "Ctrl+Alt+Shift+M",
+    "NRDK": "Ctrl+Alt+Shift+K",
+}
+
+OLD_DEFAULT_HOTKEYS = {
     "NRD": "Ctrl+Alt+1",
     "MEMORY": "Ctrl+Alt+2",
     "NRDK": "Ctrl+Alt+3",
@@ -88,6 +94,7 @@ def default_config() -> dict:
         "workspace_url": "",
         "browser": "default",
         "warmup_seconds": 7,
+        "workspace_close_seconds": 8,
         "refresh_minutes": 210,
         "refresh_enabled": True,
         "start_with_windows": True,
@@ -102,7 +109,7 @@ def default_config() -> dict:
 
 
 def merge_config(target: dict, saved: dict) -> None:
-    for key in ("workspace_url", "browser", "warmup_seconds", "refresh_minutes", "refresh_enabled", "start_with_windows"):
+    for key in ("workspace_url", "browser", "warmup_seconds", "workspace_close_seconds", "refresh_minutes", "refresh_enabled", "start_with_windows"):
         if key in saved:
             target[key] = saved[key]
 
@@ -112,6 +119,8 @@ def merge_config(target: dict, saved: dict) -> None:
             env_key = env["key"]
             if isinstance(saved_mdm.get(env_key), dict):
                 target["mdm"][env_key].update(saved_mdm[env_key])
+                if target["mdm"][env_key].get("hotkey") == OLD_DEFAULT_HOTKEYS[env_key]:
+                    target["mdm"][env_key]["hotkey"] = DEFAULT_HOTKEYS[env_key]
 
 
 def load_config() -> dict:
@@ -186,22 +195,25 @@ def shell_open(target: str, show_command: int = SW_SHOWNORMAL) -> None:
         raise OSError(f"ShellExecute failed ({value}): {target}")
 
 
-def resolve_browser_path(browser: str) -> str | None:
+def browser_candidates(browser: str) -> list[str]:
     browser = (browser or "default").lower()
     if browser == "edge":
-        candidates = [
+        return [
             rf"{os.environ.get('ProgramFiles(x86)', '')}\Microsoft\Edge\Application\msedge.exe",
             rf"{os.environ.get('ProgramFiles', '')}\Microsoft\Edge\Application\msedge.exe",
             rf"{os.environ.get('LOCALAPPDATA', '')}\Microsoft\Edge\Application\msedge.exe",
         ]
-    elif browser == "chrome":
-        candidates = [
+    if browser == "chrome":
+        return [
             rf"{os.environ.get('ProgramFiles', '')}\Google\Chrome\Application\chrome.exe",
             rf"{os.environ.get('ProgramFiles(x86)', '')}\Google\Chrome\Application\chrome.exe",
             rf"{os.environ.get('LOCALAPPDATA', '')}\Google\Chrome\Application\chrome.exe",
         ]
-    else:
-        candidates = []
+    return browser_candidates("edge") + browser_candidates("chrome")
+
+
+def resolve_browser_path(browser: str) -> str | None:
+    candidates = browser_candidates(browser)
 
     for candidate in candidates:
         if candidate and Path(candidate).exists():
@@ -209,18 +221,47 @@ def resolve_browser_path(browser: str) -> str | None:
     return None
 
 
-def open_workspace(config: dict, minimized: bool = True) -> bool:
+def close_process_tree_later(process: subprocess.Popen, seconds: int) -> None:
+    def close_process_tree() -> None:
+        if process.poll() is not None:
+            return
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=CREATE_NO_WINDOW,
+        )
+
+    timer = threading.Timer(max(1, seconds), close_process_tree)
+    timer.daemon = True
+    timer.start()
+
+
+def open_workspace(config: dict, minimized: bool = True, auto_close_seconds: int | None = None) -> bool:
     url = (config.get("workspace_url") or "").strip()
     if not url:
         return False
 
     browser_path = resolve_browser_path(config.get("browser") or "default")
     if browser_path:
-        args = ["--new-window"]
-        if minimized:
+        args = []
+        if auto_close_seconds and auto_close_seconds > 0:
+            profile_dir = CONFIG_DIR / "workspace-refresh-profile"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            args.extend([
+                f"--user-data-dir={profile_dir}",
+                "--no-first-run",
+                "--disable-default-browser-check",
+                f"--app={url}",
+            ])
+        else:
+            args.append("--new-window")
+            args.append(url)
+        if minimized and not (auto_close_seconds and auto_close_seconds > 0):
             args.append("--start-minimized")
-        args.append(url)
-        subprocess.Popen([browser_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen([browser_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if auto_close_seconds and auto_close_seconds > 0:
+            close_process_tree_later(process, auto_close_seconds)
         return True
 
     shell_open(url, SW_SHOWMINNOACTIVE if minimized else SW_SHOWNORMAL)
@@ -519,6 +560,7 @@ class LauncherApp:
         self.browser_var = tk.StringVar(value="default")
         self.refresh_enabled_var = tk.BooleanVar(value=True)
         self.refresh_minutes_var = tk.IntVar(value=210)
+        self.workspace_close_seconds_var = tk.IntVar(value=8)
         self.startup_var = tk.BooleanVar(value=True)
 
         ttk.Label(frame, text="주소").grid(row=0, column=0, sticky="e", padx=(0, 8), pady=3)
@@ -534,6 +576,9 @@ class LauncherApp:
         ttk.Checkbutton(refresh_row, text="자동", variable=self.refresh_enabled_var).pack(side="left")
         tk.Spinbox(refresh_row, from_=1, to=720, increment=1, width=6, textvariable=self.refresh_minutes_var).pack(side="left", padx=(10, 4))
         ttk.Label(refresh_row, text="분").pack(side="left")
+        ttk.Label(refresh_row, text="닫기").pack(side="left", padx=(10, 4))
+        tk.Spinbox(refresh_row, from_=1, to=120, increment=1, width=5, textvariable=self.workspace_close_seconds_var).pack(side="left")
+        ttk.Label(refresh_row, text="초").pack(side="left", padx=(4, 0))
         ttk.Button(refresh_row, text="지금 갱신", command=self.refresh_workspace_from_ui).pack(side="left", padx=(12, 0))
         ttk.Button(refresh_row, text="Workspace 열기", command=self.open_workspace_visible).pack(side="left", padx=(6, 0))
 
@@ -592,6 +637,7 @@ class LauncherApp:
         self.browser_var.set(self.config.get("browser", "default") or "default")
         self.refresh_enabled_var.set(bool(self.config.get("refresh_enabled", True)))
         self.refresh_minutes_var.set(max(1, int(self.config.get("refresh_minutes", 210) or 210)))
+        self.workspace_close_seconds_var.set(max(1, int(self.config.get("workspace_close_seconds", 8) or 8)))
         self.startup_var.set(bool(self.config.get("start_with_windows", True)) or startup_enabled_now())
 
         for env in ENVIRONMENTS:
@@ -606,6 +652,7 @@ class LauncherApp:
         config["browser"] = self.browser_var.get().strip() or "default"
         config["refresh_enabled"] = bool(self.refresh_enabled_var.get())
         config["refresh_minutes"] = max(1, int(self.refresh_minutes_var.get() or 1))
+        config["workspace_close_seconds"] = max(1, int(self.workspace_close_seconds_var.get() or 1))
         config["start_with_windows"] = bool(self.startup_var.get())
 
         for env in ENVIRONMENTS:
@@ -623,7 +670,7 @@ class LauncherApp:
             set_startup(bool(self.config.get("start_with_windows", True)))
         except Exception as exc:
             messagebox.showwarning(APP_NAME, f"Windows 시작 등록 실패:\n{exc}")
-        self.apply_runtime_settings(show_errors=not silent)
+        self.apply_runtime_settings(show_errors=False)
         if not silent:
             self.set_status("저장했습니다.")
 
@@ -657,15 +704,16 @@ class LauncherApp:
         self.hotkey_service.start()
 
     def handle_hotkey_errors(self, errors: list[str], show_errors: bool) -> None:
-        self.set_status("일부 단축키를 등록하지 못했습니다.")
+        self.set_status("일부 단축키 미등록: 이미 쓰는 조합이면 다른 키로 바꿔주세요.")
         if show_errors:
             messagebox.showwarning(APP_NAME, "단축키 확인:\n" + "\n".join(errors))
 
     def refresh_workspace(self, show_status: bool = True) -> None:
         try:
-            if open_workspace(self.config, minimized=True):
+            close_seconds = max(1, int(self.config.get("workspace_close_seconds", 8) or 8))
+            if open_workspace(self.config, minimized=True, auto_close_seconds=close_seconds):
                 if show_status:
-                    self.set_status("Workspace 갱신 요청을 보냈습니다.")
+                    self.set_status(f"Workspace 갱신 창을 열고 {close_seconds}초 뒤 닫습니다.")
             elif show_status:
                 self.set_status("Workspace 주소가 비어 있습니다.")
         except Exception as exc:
@@ -727,11 +775,40 @@ def show_windows_error(message: str) -> None:
     ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)
 
 
+def close_other_gui_instances() -> None:
+    current_pid = os.getpid()
+    if getattr(sys, "frozen", False):
+        executable = str(Path(sys.executable).resolve())
+        script = (
+            "$target = " + ps_quote(executable) + "\n"
+            "$current = " + str(current_pid) + "\n"
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.ProcessId -ne $current -and $_.ExecutablePath -eq $target } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        )
+    else:
+        script_path = str(Path(__file__).resolve())
+        script = (
+            "$needle = " + ps_quote(script_path) + "\n"
+            "$current = " + str(current_pid) + "\n"
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.ProcessId -ne $current -and $_.CommandLine -like ('*' + $needle + '*') } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=CREATE_NO_WINDOW,
+    )
+
+
 def run_cli(args: argparse.Namespace) -> int:
     config = load_config()
     try:
         if args.refresh_only:
-            open_workspace(config, minimized=True)
+            close_seconds = max(1, int(config.get("workspace_close_seconds", 8) or 8))
+            open_workspace(config, minimized=True, auto_close_seconds=close_seconds)
             return 0
         if args.launch:
             env_key = args.launch.upper()
@@ -760,6 +837,7 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     if args.launch or args.refresh_only:
         return run_cli(args)
+    close_other_gui_instances()
     return LauncherApp(background=args.background).run()
 
 
