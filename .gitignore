@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+
+.venv/
+venv/
+
+build/
+dist/
+*.spec
+tools/gh/
+
+*.log
+*.tmp
+
+gpm-launcher.config.json
+*.user
