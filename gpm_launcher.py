@@ -244,7 +244,7 @@ def shell_open(target: str, show_command: int) -> None:
         raise OSError(f"ShellExecute failed ({value}): {target}")
 
 
-def launch_environment(config: dict, env_key: str, include_workspace: bool = True, wait: bool = True) -> None:
+def launch_environment(config: dict, env_key: str, include_workspace: bool = False, wait: bool = True) -> None:
     env_config = config.get("mdm", {}).get(env_key, {})
     mdm_url = normalize_mdm_url(env_config.get("url", ""))
     if not mdm_url:
@@ -618,7 +618,6 @@ class MainWindow(QMainWindow):
         layout.addRow("주소", self.workspace_edit)
         layout.addRow("브라우저", self.browser_combo)
         layout.addRow("갱신 간격", refresh_row)
-        layout.addRow("GPM 실행 대기", self.warmup_seconds_spin)
         layout.addRow("", self.startup_check)
         layout.addRow("", workspace_buttons)
         return group
@@ -806,17 +805,7 @@ class MainWindow(QMainWindow):
             if not mdm_url:
                 raise ValueError(f"{env_key} MDM 주소가 비어 있습니다.")
 
-            if (self.config.get("workspace_url") or "").strip():
-                open_workspace(self.config, minimized=True)
-                delay_ms = max(0, int(self.config.get("warmup_seconds", 7) or 0)) * 1000
-            else:
-                delay_ms = 0
-
-            timer = QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(lambda url=mdm_url, t=timer: self.finish_delayed_launch(url, t))
-            self.pending_launch_timers.append(timer)
-            timer.start(delay_ms)
+            launch_mdm_url(mdm_url)
             label = next(env["label"] for env in ENVIRONMENTS if env["key"] == env_key)
             self.statusBar().showMessage(f"{label} 실행 요청을 보냈습니다.", 4000)
         except Exception as exc:
@@ -884,7 +873,7 @@ def run_cli(args: argparse.Namespace) -> int:
             allowed = {env["key"] for env in ENVIRONMENTS}
             if env_key not in allowed:
                 raise ValueError(f"Unknown environment: {args.launch}")
-            launch_environment(config, env_key, include_workspace=True, wait=True)
+            launch_environment(config, env_key, include_workspace=False, wait=True)
             return 0
     except Exception as exc:
         show_windows_error(str(exc))

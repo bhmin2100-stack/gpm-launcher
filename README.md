@@ -8,6 +8,7 @@ Windows launcher for the company GPM Curl applications.
 - Supports user-configurable global hotkeys.
 - Creates desktop shortcuts named `NRD GPM`, `MEM GPM`, and `NRDK GPM`.
 - Keeps the workspace session alive in the background before the 4-hour timeout.
+- Launches GPM directly from hotkeys and desktop shortcuts without opening the workspace first.
 - Runs from the Windows system tray and can start with Windows.
 
 ## Download
