@@ -40,6 +40,7 @@ MOD_NOREPEAT = 0x4000
 CREATE_NO_WINDOW = 0x08000000
 SW_SHOWNORMAL = 1
 SW_SHOWMINNOACTIVE = 7
+SW_MAXIMIZE = 3
 SW_RESTORE = 9
 GWL_WNDPROC = -4
 NIM_ADD = 0x00000000
@@ -504,11 +505,13 @@ def visible_window_handles() -> set[int]:
     return {window["hwnd"] for window in enumerate_visible_windows()}
 
 
-def focus_window(hwnd: int) -> bool:
+def focus_window(hwnd: int, maximize: bool = True) -> bool:
     handle = wintypes.HWND(hwnd)
     if not user32.IsWindow(handle):
         return False
-    if user32.IsIconic(handle):
+    if maximize:
+        user32.ShowWindow(handle, SW_MAXIMIZE)
+    elif user32.IsIconic(handle):
         user32.ShowWindow(handle, SW_RESTORE)
     else:
         user32.ShowWindow(handle, SW_SHOWNORMAL)
@@ -522,6 +525,10 @@ def focus_cached_entry_window(kind: str, entry: dict, index: int) -> bool:
     hwnd = WINDOW_HANDLE_CACHE.get(key)
     if not hwnd:
         return False
+    if not cached_window_matches_entry(hwnd, kind, entry, index):
+        WINDOW_HANDLE_CACHE.pop(key, None)
+        save_window_handle_cache()
+        return False
     if focus_window(hwnd):
         return True
     WINDOW_HANDLE_CACHE.pop(key, None)
@@ -529,17 +536,39 @@ def focus_cached_entry_window(kind: str, entry: dict, index: int) -> bool:
     return False
 
 
+def cached_window_matches_entry(hwnd: int, kind: str, entry: dict, index: int) -> bool:
+    handle = wintypes.HWND(hwnd)
+    if not user32.IsWindow(handle) or not user32.IsWindowVisible(handle):
+        return False
+    title = get_window_text(hwnd)
+    if not title:
+        return False
+    if kind == "oi":
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(handle, ctypes.byref(pid))
+        command_line = get_process_command_lines({int(pid.value)}).get(int(pid.value), "")
+        return command_line_matches_oi(command_line, entry) or title_matches_entry(title, entry, kind, index)
+    return title_matches_entry(title, entry, kind, index)
+
+
 def title_matches_entry(title: str, entry: dict, kind: str, index: int) -> bool:
     lowered = title.lower()
     if lowered == APP_NAME.lower() or "gpm launcher" in lowered:
         return False
     name = safe_name(entry.get("name", ""), f"{kind.upper()} {index + 1}").lower()
-    candidates = [name]
     if kind == "oi":
-        candidates.append(f"{name} oi")
-    elif kind == "gpm":
-        candidates.append(f"{name} gpm")
-    return any(candidate and len(candidate) >= 2 and candidate in lowered for candidate in candidates)
+        return bool(name and len(name) >= 2 and name in lowered and title_has_oi_marker(lowered) and not title_has_gpm_marker(lowered))
+    if kind == "gpm":
+        return bool(name and len(name) >= 2 and name in lowered and title_has_gpm_marker(lowered) and not title_has_oi_marker(lowered))
+    return False
+
+
+def title_has_gpm_marker(title: str) -> bool:
+    return bool(re.search(r"\bgpm\b", title, flags=re.IGNORECASE))
+
+
+def title_has_oi_marker(title: str) -> bool:
+    return bool(re.search(r"\bo\s*/\s*i\b|\boi\b", title, flags=re.IGNORECASE))
 
 
 def get_process_command_lines(pids: set[int]) -> dict[int, str]:
@@ -655,6 +684,7 @@ def remember_new_entry_window(kind: str, entry: dict, index: int, before_handles
         window = pick_new_entry_window(kind, entry, before_handles)
         if window:
             cache_entry_window(kind, entry, index, window["hwnd"])
+            focus_window(window["hwnd"], maximize=True)
             return
         time.sleep(0.4)
 
