@@ -66,4 +66,6 @@ The app stores user settings under:
 %APPDATA%\GPM Launcher\config.json
 ```
 
+For OI entries, use a name that includes the page-identifying text shown in the window title, such as `P2L3` or `P1L7`. This helps the launcher find an already-open window instead of opening another one.
+
 Do not commit real company workspace URLs or MDM launch URLs.

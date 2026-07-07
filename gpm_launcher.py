@@ -1735,7 +1735,13 @@ class LauncherApp:
         ttk.Button(buttons, text="실행", command=self.launch_selected_oi).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="선택 OI 아이콘 다운로드", command=self.create_selected_oi_icon).pack(side="left", padx=(6, 0))
 
-        hint = ttk.Label(frame, text="OI는 주소창 없는 앱 창으로 열립니다. 작업표시줄 분리를 위해 항목별 바로가기를 만들어 실행합니다.", foreground="#555")
+        hint = ttk.Label(
+            frame,
+            text="OI 이름에는 실제 페이지 제목에서 구분되는 문자열(P2L3, P1L7 등)을 넣으면 이미 열린 창을 더 잘 찾습니다.",
+            foreground="#555",
+            wraplength=520,
+            justify="left",
+        )
         hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     def _build_agreement_frame(self, parent: ttk.Frame, row: int, column: int) -> None:
