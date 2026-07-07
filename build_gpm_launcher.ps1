@@ -13,6 +13,8 @@ python -m PyInstaller `
   --name GPMLauncher `
   --exclude-module PySide6 `
   --exclude-module shiboken6 `
+  --add-data "assets\gpm_launcher.ico;assets" `
+  --add-data "assets\oi_launcher.ico;assets" `
   --icon assets\gpm_launcher.ico `
   gpm_launcher.py
 

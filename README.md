@@ -10,6 +10,8 @@ Windows launcher for the company GPM Curl applications.
 - Keeps the workspace session alive before the 4-hour timeout, with a refresh interval adjustable in 1-minute steps.
 - Opens the workspace refresh window briefly and closes it automatically after the configured number of seconds.
 - Launches GPM directly from hotkeys and desktop shortcuts without opening the workspace first.
+- Adds configurable OI entries with user-defined names, URLs, and hotkeys.
+- Opens OI pages in browser app mode without the normal address bar or toolbar.
 - Uses a lightweight basic Windows GUI and can start with Windows.
 - Automatically extracts the `curl://launch/...` target when a workspace launch URL is pasted.
 

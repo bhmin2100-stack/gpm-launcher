@@ -21,8 +21,15 @@ CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "GPM Launcher"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 LEGACY_CONFIG_PATH = Path(__file__).resolve().parent / "gpm-launcher.config.json"
 HOTKEY_BASE_ID = 0x4700
+OI_HOTKEY_BASE_ID = 0x4800
 WM_HOTKEY = 0x0312
+WM_COMMAND = 0x0111
+WM_NULL = 0x0000
 WM_QUIT = 0x0012
+WM_APP = 0x8000
+WM_TRAYICON = WM_APP + 1
+WM_LBUTTONDBLCLK = 0x0203
+WM_RBUTTONUP = 0x0205
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
@@ -31,6 +38,20 @@ MOD_NOREPEAT = 0x4000
 CREATE_NO_WINDOW = 0x08000000
 SW_SHOWNORMAL = 1
 SW_SHOWMINNOACTIVE = 7
+GWL_WNDPROC = -4
+NIM_ADD = 0x00000000
+NIM_MODIFY = 0x00000001
+NIM_DELETE = 0x00000002
+NIF_MESSAGE = 0x00000001
+NIF_ICON = 0x00000002
+NIF_TIP = 0x00000004
+IMAGE_ICON = 1
+LR_LOADFROMFILE = 0x00000010
+LR_DEFAULTSIZE = 0x00000040
+MF_STRING = 0x00000000
+TPM_RIGHTBUTTON = 0x00000002
+ID_TRAY_SHOW = 1001
+ID_TRAY_EXIT = 1002
 
 ENVIRONMENTS = [
     {"key": "NRD", "label": "NRD", "shortcut": "NRD GPM"},
@@ -50,6 +71,10 @@ OLD_DEFAULT_HOTKEYS = {
     "NRDK": "Ctrl+Alt+3",
 }
 
+DEFAULT_OI_ENTRIES = [
+    {"name": "NRD", "url": "", "hotkey": "Ctrl+Alt+Shift+O"},
+]
+
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
@@ -66,9 +91,33 @@ class MSG(ctypes.Structure):
     ]
 
 
+class NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uID", wintypes.UINT),
+        ("uFlags", wintypes.UINT),
+        ("uCallbackMessage", wintypes.UINT),
+        ("hIcon", wintypes.HICON),
+        ("szTip", wintypes.WCHAR * 128),
+    ]
+
+
+LONG_PTR = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
+LRESULT = LONG_PTR
+WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+
+
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 shell32 = ctypes.windll.shell32
+
+if ctypes.sizeof(ctypes.c_void_p) == 8:
+    GetWindowLongPtrW = user32.GetWindowLongPtrW
+    SetWindowLongPtrW = user32.SetWindowLongPtrW
+else:
+    GetWindowLongPtrW = user32.GetWindowLongW
+    SetWindowLongPtrW = user32.SetWindowLongW
 
 user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
 user32.RegisterHotKey.restype = wintypes.BOOL
@@ -78,15 +127,46 @@ user32.GetMessageW.argtypes = [ctypes.POINTER(MSG), wintypes.HWND, wintypes.UINT
 user32.GetMessageW.restype = wintypes.BOOL
 user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostThreadMessageW.restype = wintypes.BOOL
+GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+GetWindowLongPtrW.restype = LONG_PTR
+SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
+SetWindowLongPtrW.restype = LONG_PTR
+user32.CallWindowProcW.argtypes = [LONG_PTR, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.CallWindowProcW.restype = LRESULT
+user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.LoadImageW.restype = wintypes.HANDLE
+user32.DestroyIcon.argtypes = [wintypes.HICON]
+user32.DestroyIcon.restype = wintypes.BOOL
+user32.CreatePopupMenu.restype = wintypes.HMENU
+user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+user32.AppendMenuW.restype = wintypes.BOOL
+user32.TrackPopupMenu.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND, ctypes.c_void_p]
+user32.TrackPopupMenu.restype = wintypes.BOOL
+user32.DestroyMenu.argtypes = [wintypes.HMENU]
+user32.DestroyMenu.restype = wintypes.BOOL
+user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+user32.GetCursorPos.restype = wintypes.BOOL
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.SetForegroundWindow.restype = wintypes.BOOL
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostMessageW.restype = wintypes.BOOL
 kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
 shell32.ShellExecuteW.restype = ctypes.c_void_p
+shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+shell32.Shell_NotifyIconW.restype = wintypes.BOOL
 
 
 def app_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def resource_base_dir() -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    return app_base_dir()
 
 
 def default_config() -> dict:
@@ -98,6 +178,7 @@ def default_config() -> dict:
         "refresh_minutes": 210,
         "refresh_enabled": True,
         "start_with_windows": True,
+        "oi_entries": [entry.copy() for entry in DEFAULT_OI_ENTRIES],
         "mdm": {
             env["key"]: {
                 "url": "",
@@ -121,6 +202,20 @@ def merge_config(target: dict, saved: dict) -> None:
                 target["mdm"][env_key].update(saved_mdm[env_key])
                 if target["mdm"][env_key].get("hotkey") == OLD_DEFAULT_HOTKEYS[env_key]:
                     target["mdm"][env_key]["hotkey"] = DEFAULT_HOTKEYS[env_key]
+
+    saved_oi = saved.get("oi_entries", [])
+    if isinstance(saved_oi, list):
+        entries = []
+        for item in saved_oi:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            url = str(item.get("url", "")).strip()
+            hotkey = str(item.get("hotkey", "")).strip()
+            if name or url or hotkey:
+                entries.append({"name": name, "url": url, "hotkey": hotkey})
+        if entries:
+            target["oi_entries"] = entries
 
 
 def load_config() -> dict:
@@ -283,6 +378,29 @@ def launch_environment(config: dict, env_key: str) -> None:
     launch_mdm_url(mdm_url)
 
 
+def normalize_web_url(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", text):
+        return text
+    return "http://" + text
+
+
+def safe_name(value: str, fallback: str = "OI") -> str:
+    text = (value or "").strip() or fallback
+    text = re.sub(r"[\\/:*?\"<>|]+", "_", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:80] or fallback
+
+
+def slug_name(value: str, fallback: str = "oi") -> str:
+    text = safe_name(value, fallback).lower()
+    text = re.sub(r"[^a-z0-9가-힣._ -]+", "_", text)
+    text = re.sub(r"\s+", "-", text).strip("._-")
+    return text[:80] or fallback
+
+
 def get_desktop_path() -> Path:
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
@@ -306,11 +424,21 @@ def pythonw_path() -> str:
 
 def icon_location() -> str:
     if getattr(sys, "frozen", False):
+        ico = resource_base_dir() / "assets" / "gpm_launcher.ico"
+        if ico.exists():
+            return str(ico)
         return str(Path(sys.executable).resolve())
-    ico = app_base_dir() / "assets" / "gpm_launcher.ico"
+    ico = resource_base_dir() / "assets" / "gpm_launcher.ico"
     if ico.exists():
         return str(ico)
     return str(Path(sys.executable).resolve())
+
+
+def oi_icon_location() -> str:
+    ico = resource_base_dir() / "assets" / "oi_launcher.ico"
+    if ico.exists():
+        return str(ico)
+    return icon_location()
 
 
 def launch_command_for_env(env_key: str) -> tuple[str, str, str]:
@@ -338,6 +466,81 @@ def create_shortcut(shortcut_path: Path, target: str, arguments: str, working_di
         stderr=subprocess.DEVNULL,
         creationflags=CREATE_NO_WINDOW,
     )
+
+
+def oi_shortcut_path(entry: dict, index: int) -> Path:
+    shortcuts_dir = CONFIG_DIR / "oi-shortcuts"
+    shortcuts_dir.mkdir(parents=True, exist_ok=True)
+    name = safe_name(entry.get("name", ""), f"OI {index + 1}")
+    return shortcuts_dir / f"OI - {name}.lnk"
+
+
+def create_oi_shortcut(entry: dict, index: int, config: dict) -> Path:
+    name = safe_name(entry.get("name", ""), f"OI {index + 1}")
+    url = normalize_web_url(entry.get("url", ""))
+    if not url:
+        raise ValueError(f"{name} OI 주소가 비어 있습니다.")
+
+    browser_path = resolve_browser_path(config.get("browser") or "default")
+    if not browser_path:
+        raise ValueError("Edge 또는 Chrome을 찾지 못했습니다.")
+
+    profile_dir = CONFIG_DIR / "oi-profiles" / slug_name(name, f"oi-{index + 1}")
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    args = " ".join(
+        [
+            f"--user-data-dir={quote_arg(str(profile_dir))}",
+            "--no-first-run",
+            "--disable-default-browser-check",
+            "--start-maximized",
+            f"--app={quote_arg(url)}",
+        ]
+    )
+    shortcut = oi_shortcut_path(entry, index)
+    create_shortcut(shortcut, browser_path, args, str(profile_dir), oi_icon_location())
+    return shortcut
+
+
+def create_oi_desktop_shortcut(entry: dict, index: int, config: dict) -> Path:
+    name = safe_name(entry.get("name", ""), f"OI {index + 1}")
+    url = normalize_web_url(entry.get("url", ""))
+    if not url:
+        raise ValueError(f"{name} OI 주소가 비어 있습니다.")
+
+    browser_path = resolve_browser_path(config.get("browser") or "default")
+    if not browser_path:
+        raise ValueError("Edge 또는 Chrome을 찾지 못했습니다.")
+
+    profile_dir = CONFIG_DIR / "oi-profiles" / slug_name(name, f"oi-{index + 1}")
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    args = " ".join(
+        [
+            f"--user-data-dir={quote_arg(str(profile_dir))}",
+            "--no-first-run",
+            "--disable-default-browser-check",
+            "--start-maximized",
+            f"--app={quote_arg(url)}",
+        ]
+    )
+    desktop = get_desktop_path()
+    desktop.mkdir(parents=True, exist_ok=True)
+    shortcut = desktop / f"OI - {name}.lnk"
+    create_shortcut(shortcut, browser_path, args, str(profile_dir), oi_icon_location())
+    return shortcut
+
+
+def quote_arg(value: str) -> str:
+    if not value or re.search(r"\s|\"", value):
+        return '"' + value.replace('"', '\\"') + '"'
+    return value
+
+
+def launch_oi_entry(config: dict, index: int) -> None:
+    entries = config.get("oi_entries", [])
+    if index < 0 or index >= len(entries):
+        raise ValueError("OI 항목을 찾지 못했습니다.")
+    shortcut = create_oi_shortcut(entries[index], index, config)
+    shell_open(str(shortcut), SW_SHOWNORMAL)
 
 
 def create_desktop_shortcuts() -> list[Path]:
@@ -436,6 +639,124 @@ def hotkey_to_native(sequence: str) -> tuple[int, int]:
     return modifiers, vk
 
 
+class TrayIcon:
+    def __init__(self, root: tk.Tk, title: str, icon_path: str, on_show, on_exit) -> None:
+        self.root = root
+        self.title = title
+        self.icon_path = icon_path
+        self.on_show = on_show
+        self.on_exit = on_exit
+        self.hwnd = wintypes.HWND(int(root.winfo_id()))
+        self.icon_id = 1
+        self.hicon: int | None = None
+        self.visible = False
+        self.old_wndproc: int | None = None
+        self._wndproc = WNDPROC(self._handle_message)
+
+    def show(self) -> bool:
+        if self.visible:
+            return True
+        if not self._ensure_window_proc():
+            return False
+
+        self.hicon = self._load_icon()
+        if not self.hicon:
+            return False
+
+        data = self._notify_data()
+        if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data)):
+            user32.DestroyIcon(wintypes.HICON(self.hicon))
+            self.hicon = None
+            return False
+
+        self.visible = True
+        return True
+
+    def hide(self) -> None:
+        if self.visible:
+            data = self._notify_data()
+            shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
+            self.visible = False
+        if self.hicon:
+            user32.DestroyIcon(wintypes.HICON(self.hicon))
+            self.hicon = None
+
+    def destroy(self) -> None:
+        self.hide()
+        if self.old_wndproc:
+            SetWindowLongPtrW(self.hwnd, GWL_WNDPROC, self.old_wndproc)
+            self.old_wndproc = None
+
+    def _ensure_window_proc(self) -> bool:
+        if self.old_wndproc:
+            return True
+        proc_ptr = ctypes.cast(self._wndproc, ctypes.c_void_p).value
+        if not proc_ptr:
+            return False
+        old = SetWindowLongPtrW(self.hwnd, GWL_WNDPROC, int(proc_ptr))
+        if not old:
+            return False
+        self.old_wndproc = int(old)
+        return True
+
+    def _load_icon(self) -> int | None:
+        if self.icon_path and Path(self.icon_path).exists():
+            handle = user32.LoadImageW(None, self.icon_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
+            if handle:
+                return int(handle)
+        return None
+
+    def _notify_data(self) -> NOTIFYICONDATAW:
+        data = NOTIFYICONDATAW()
+        data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        data.hWnd = self.hwnd
+        data.uID = self.icon_id
+        data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+        data.uCallbackMessage = WM_TRAYICON
+        data.hIcon = wintypes.HICON(self.hicon or 0)
+        data.szTip = self.title[:127]
+        return data
+
+    def _handle_message(self, hwnd, message, wparam, lparam):
+        if message == WM_TRAYICON:
+            event = int(lparam)
+            if event == WM_LBUTTONDBLCLK:
+                self.root.after(0, self.on_show)
+            elif event == WM_RBUTTONUP:
+                self._show_menu()
+            return 0
+
+        if message == WM_COMMAND:
+            command_id = int(wparam) & 0xFFFF
+            if command_id == ID_TRAY_SHOW:
+                self.root.after(0, self.on_show)
+                return 0
+            if command_id == ID_TRAY_EXIT:
+                self.root.after(0, self.on_exit)
+                return 0
+
+        if self.old_wndproc:
+            return user32.CallWindowProcW(self.old_wndproc, hwnd, message, wparam, lparam)
+        return 0
+
+    def _show_menu(self) -> None:
+        point = POINT()
+        if not user32.GetCursorPos(ctypes.byref(point)):
+            return
+
+        menu = user32.CreatePopupMenu()
+        if not menu:
+            return
+        try:
+            user32.AppendMenuW(menu, MF_STRING, ID_TRAY_SHOW, "열기")
+            user32.AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, "종료")
+            user32.SetForegroundWindow(self.hwnd)
+            user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, self.hwnd, None)
+            user32.PostMessageW(self.hwnd, WM_NULL, 0, 0)
+        finally:
+            user32.DestroyMenu(menu)
+
+
 class HotkeyService:
     def __init__(self, config: dict, on_hotkey, on_errors) -> None:
         self.config = config
@@ -478,9 +799,29 @@ class HotkeyService:
                     continue
                 hotkey_id = HOTKEY_BASE_ID + index
                 if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
-                    registered[hotkey_id] = env_key
+                    registered[hotkey_id] = f"gpm:{env_key}"
                 else:
                     errors.append(f"{env['label']}: 단축키 등록 실패 ({hotkey})")
+
+            for index, entry in enumerate(self.config.get("oi_entries", [])):
+                if not isinstance(entry, dict):
+                    continue
+                name = safe_name(entry.get("name", ""), f"OI {index + 1}")
+                if not (entry.get("url") or "").strip():
+                    continue
+                hotkey = (entry.get("hotkey") or "").strip()
+                if not hotkey:
+                    continue
+                try:
+                    modifiers, vk = hotkey_to_native(hotkey)
+                except ValueError as exc:
+                    errors.append(f"OI {name}: {exc}")
+                    continue
+                hotkey_id = OI_HOTKEY_BASE_ID + index
+                if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
+                    registered[hotkey_id] = f"oi:{index}"
+                else:
+                    errors.append(f"OI {name}: 단축키 등록 실패 ({hotkey})")
 
             if errors:
                 self.on_errors(errors)
@@ -489,9 +830,9 @@ class HotkeyService:
             msg = MSG()
             while not self.stopping.is_set() and user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
                 if msg.message == WM_HOTKEY:
-                    env_key = registered.get(int(msg.wParam))
-                    if env_key:
-                        self.on_hotkey(env_key)
+                    action = registered.get(int(msg.wParam))
+                    if action:
+                        self.on_hotkey(action)
         finally:
             for hotkey_id in registered:
                 user32.UnregisterHotKey(None, hotkey_id)
@@ -502,9 +843,9 @@ class LauncherApp:
     def __init__(self, background: bool = False) -> None:
         self.root = tk.Tk()
         self.root.title(APP_NAME)
-        self.root.geometry("760x520")
-        self.root.minsize(700, 480)
-        ico = app_base_dir() / "assets" / "gpm_launcher.ico"
+        self.root.geometry("860x700")
+        self.root.minsize(760, 620)
+        ico = resource_base_dir() / "assets" / "gpm_launcher.ico"
         if ico.exists():
             try:
                 self.root.iconbitmap(str(ico))
@@ -516,14 +857,18 @@ class LauncherApp:
         self.refresh_after_id: str | None = None
         self.url_vars: dict[str, tk.StringVar] = {}
         self.hotkey_vars: dict[str, tk.StringVar] = {}
+        self.oi_entries: list[dict] = []
+        self.tray_icon: TrayIcon | None = None
 
         self._build_ui()
         self._load_config_to_ui()
         self.apply_runtime_settings(show_errors=False)
-        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        self.root.update_idletasks()
+        self.tray_icon = TrayIcon(self.root, APP_NAME, icon_location(), self.show_from_tray, self.quit)
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
 
         if background:
-            self.root.withdraw()
+            self.hide_to_tray(show_warning=False, force=True)
             if self.config.get("refresh_enabled", True):
                 self.root.after(2500, lambda: self.refresh_workspace(show_status=False))
 
@@ -542,9 +887,11 @@ class LauncherApp:
         body.grid(row=1, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
         body.rowconfigure(1, weight=1)
+        body.rowconfigure(2, weight=1)
 
         self._build_workspace_frame(body)
         self._build_mdm_frame(body)
+        self._build_oi_frame(body)
         self._build_button_row(outer)
 
         self.status_var = tk.StringVar(value="준비됨")
@@ -608,13 +955,56 @@ class LauncherApp:
         hint = ttk.Label(frame, text="GPM 임시 주소나 curl://launch/... 주소를 붙여넣으면 자동으로 실행 주소만 정리합니다.", foreground="#555")
         hint.grid(row=len(ENVIRONMENTS) + 1, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
+    def _build_oi_frame(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text="OI", padding=10)
+        frame.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        self.oi_name_var = tk.StringVar()
+        self.oi_url_var = tk.StringVar()
+        self.oi_hotkey_var = tk.StringVar()
+
+        editor = ttk.Frame(frame)
+        editor.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 8))
+        editor.columnconfigure(3, weight=1)
+        ttk.Label(editor, text="이름").grid(row=0, column=0, sticky="e", padx=(0, 6))
+        ttk.Entry(editor, textvariable=self.oi_name_var, width=14).grid(row=0, column=1, sticky="w", padx=(0, 10))
+        ttk.Label(editor, text="주소").grid(row=0, column=2, sticky="e", padx=(0, 6))
+        oi_url_entry = ttk.Entry(editor, textvariable=self.oi_url_var)
+        oi_url_entry.grid(row=0, column=3, sticky="ew", padx=(0, 10))
+        oi_url_entry.bind("<FocusOut>", lambda _event=None: self._normalize_oi_editor_url())
+        oi_url_entry.bind("<<Paste>>", lambda _event=None: self.root.after(80, self._normalize_oi_editor_url))
+        ttk.Label(editor, text="단축키").grid(row=0, column=4, sticky="e", padx=(0, 6))
+        ttk.Entry(editor, textvariable=self.oi_hotkey_var, width=18).grid(row=0, column=5, sticky="w")
+
+        self.oi_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey"), show="headings", height=5)
+        self.oi_tree.heading("name", text="이름")
+        self.oi_tree.heading("url", text="주소")
+        self.oi_tree.heading("hotkey", text="단축키")
+        self.oi_tree.column("name", width=120, stretch=False)
+        self.oi_tree.column("url", width=420, stretch=True)
+        self.oi_tree.column("hotkey", width=150, stretch=False)
+        self.oi_tree.grid(row=1, column=0, columnspan=4, sticky="nsew")
+        self.oi_tree.bind("<<TreeviewSelect>>", lambda _event=None: self._load_selected_oi_to_editor())
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Button(buttons, text="추가 / 수정", command=self.add_or_update_oi).pack(side="left")
+        ttk.Button(buttons, text="삭제", command=self.delete_selected_oi).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="실행", command=self.launch_selected_oi).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="OI 바탕화면 아이콘", command=self.create_selected_oi_icon).pack(side="left", padx=(6, 0))
+
+        hint = ttk.Label(frame, text="OI는 주소창 없는 앱 창으로 열립니다. 작업표시줄 분리를 위해 항목별 바로가기를 만들어 실행합니다.", foreground="#555")
+        hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
     def _build_button_row(self, parent: ttk.Frame) -> None:
         row = ttk.Frame(parent)
         row.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         row.columnconfigure(0, weight=1)
         ttk.Button(row, text="저장 / 적용", command=self.save_from_ui).grid(row=0, column=1, padx=(0, 6))
         ttk.Button(row, text="바탕화면 아이콘 생성", command=self.create_icons).grid(row=0, column=2, padx=(0, 6))
-        ttk.Button(row, text="숨기기", command=self.root.withdraw).grid(row=0, column=3, padx=(0, 6))
+        ttk.Button(row, text="숨기기", command=self.hide_to_tray).grid(row=0, column=3, padx=(0, 6))
         ttk.Button(row, text="종료", command=self.quit).grid(row=0, column=4)
 
     def _bind_auto_normalize(self, entry: ttk.Entry, var: tk.StringVar) -> None:
@@ -632,6 +1022,92 @@ class LauncherApp:
             var.set(after)
             self.set_status("주소를 curl 실행 주소로 정리했습니다.")
 
+    def _normalize_oi_editor_url(self) -> None:
+        before = self.oi_url_var.get()
+        after = normalize_web_url(before)
+        if before.strip() and after != before:
+            self.oi_url_var.set(after)
+            self.set_status("OI 주소를 브라우저 주소로 정리했습니다.")
+
+    def _refresh_oi_tree(self) -> None:
+        for item in self.oi_tree.get_children():
+            self.oi_tree.delete(item)
+        for index, entry in enumerate(self.oi_entries):
+            self.oi_tree.insert("", "end", iid=str(index), values=(entry.get("name", ""), entry.get("url", ""), entry.get("hotkey", "")))
+
+    def _selected_oi_index(self) -> int | None:
+        selection = self.oi_tree.selection()
+        if not selection:
+            return None
+        try:
+            return int(selection[0])
+        except ValueError:
+            return None
+
+    def _load_selected_oi_to_editor(self) -> None:
+        index = self._selected_oi_index()
+        if index is None or index >= len(self.oi_entries):
+            return
+        entry = self.oi_entries[index]
+        self.oi_name_var.set(entry.get("name", ""))
+        self.oi_url_var.set(entry.get("url", ""))
+        self.oi_hotkey_var.set(entry.get("hotkey", ""))
+
+    def add_or_update_oi(self) -> None:
+        name = safe_name(self.oi_name_var.get(), f"OI {len(self.oi_entries) + 1}")
+        url = normalize_web_url(self.oi_url_var.get())
+        hotkey = self.oi_hotkey_var.get().strip()
+        if not url:
+            messagebox.showwarning(APP_NAME, "OI 주소를 입력하세요.")
+            return
+        entry = {"name": name, "url": url, "hotkey": hotkey}
+        index = self._selected_oi_index()
+        if index is None or index >= len(self.oi_entries):
+            self.oi_entries.append(entry)
+            index = len(self.oi_entries) - 1
+        else:
+            self.oi_entries[index] = entry
+        self._refresh_oi_tree()
+        self.oi_tree.selection_set(str(index))
+        self.save_from_ui(silent=True)
+        self.set_status(f"OI {name} 항목을 저장했습니다.")
+
+    def delete_selected_oi(self) -> None:
+        index = self._selected_oi_index()
+        if index is None or index >= len(self.oi_entries):
+            self.set_status("삭제할 OI 항목을 선택하세요.")
+            return
+        name = self.oi_entries[index].get("name", f"OI {index + 1}")
+        del self.oi_entries[index]
+        self.oi_name_var.set("")
+        self.oi_url_var.set("")
+        self.oi_hotkey_var.set("")
+        self._refresh_oi_tree()
+        self.save_from_ui(silent=True)
+        self.set_status(f"OI {name} 항목을 삭제했습니다.")
+
+    def launch_selected_oi(self) -> None:
+        index = self._selected_oi_index()
+        if index is None:
+            self.add_or_update_oi()
+            index = self._selected_oi_index()
+        if index is not None:
+            self.launch_oi(index)
+
+    def create_selected_oi_icon(self) -> None:
+        index = self._selected_oi_index()
+        if index is None or index >= len(self.oi_entries):
+            self.set_status("아이콘을 만들 OI 항목을 선택하세요.")
+            return
+        self.save_from_ui(silent=True)
+        try:
+            entry = self.oi_entries[index]
+            shortcut = create_oi_desktop_shortcut(entry, index, self.config)
+            messagebox.showinfo(APP_NAME, f"바탕화면 아이콘을 만들었습니다.\n\n{shortcut.name}")
+            self.set_status(f"{shortcut.name} 아이콘을 만들었습니다.")
+        except Exception as exc:
+            messagebox.showwarning(APP_NAME, f"OI 아이콘 생성 실패:\n{exc}")
+
     def _load_config_to_ui(self) -> None:
         self.workspace_var.set(self.config.get("workspace_url", ""))
         self.browser_var.set(self.config.get("browser", "default") or "default")
@@ -645,6 +1121,8 @@ class LauncherApp:
             env_config = self.config.get("mdm", {}).get(env_key, {})
             self.url_vars[env_key].set(env_config.get("url", ""))
             self.hotkey_vars[env_key].set(env_config.get("hotkey", DEFAULT_HOTKEYS[env_key]))
+        self.oi_entries = [entry.copy() for entry in self.config.get("oi_entries", []) if isinstance(entry, dict)]
+        self._refresh_oi_tree()
 
     def read_from_ui(self) -> dict:
         config = default_config()
@@ -661,6 +1139,13 @@ class LauncherApp:
             self.url_vars[env_key].set(normalized)
             config["mdm"][env_key]["url"] = normalized
             config["mdm"][env_key]["hotkey"] = self.hotkey_vars[env_key].get().strip()
+        config["oi_entries"] = []
+        for index, entry in enumerate(self.oi_entries):
+            name = safe_name(entry.get("name", ""), f"OI {index + 1}")
+            url = normalize_web_url(entry.get("url", ""))
+            hotkey = (entry.get("hotkey") or "").strip()
+            if name or url or hotkey:
+                config["oi_entries"].append({"name": name, "url": url, "hotkey": hotkey})
         return config
 
     def save_from_ui(self, silent: bool = False) -> None:
@@ -698,10 +1183,19 @@ class LauncherApp:
             self.hotkey_service.stop()
         self.hotkey_service = HotkeyService(
             self.config,
-            on_hotkey=lambda key: self.root.after(0, lambda: self.launch_env(key)),
+            on_hotkey=lambda action: self.root.after(0, lambda: self.handle_hotkey_action(action)),
             on_errors=lambda errors: self.root.after(0, lambda: self.handle_hotkey_errors(errors, show_errors)),
         )
         self.hotkey_service.start()
+
+    def handle_hotkey_action(self, action: str) -> None:
+        if action.startswith("gpm:"):
+            self.launch_env(action.split(":", 1)[1])
+        elif action.startswith("oi:"):
+            try:
+                self.launch_oi(int(action.split(":", 1)[1]))
+            except ValueError:
+                self.set_status("OI 단축키 실행 대상을 찾지 못했습니다.")
 
     def handle_hotkey_errors(self, errors: list[str], show_errors: bool) -> None:
         self.set_status("일부 단축키 미등록: 이미 쓰는 조합이면 다른 키로 바꿔주세요.")
@@ -746,6 +1240,16 @@ class LauncherApp:
         except Exception as exc:
             messagebox.showwarning(APP_NAME, str(exc))
 
+    def launch_oi(self, index: int) -> None:
+        try:
+            self.config = self.read_from_ui()
+            save_config(self.config)
+            launch_oi_entry(self.config, index)
+            name = self.config.get("oi_entries", [])[index].get("name", f"OI {index + 1}")
+            self.set_status(f"OI {name} 실행 요청을 보냈습니다.")
+        except Exception as exc:
+            messagebox.showwarning(APP_NAME, f"OI 실행 실패:\n{exc}")
+
     def create_icons(self) -> None:
         self.save_from_ui(silent=True)
         try:
@@ -756,10 +1260,31 @@ class LauncherApp:
         except Exception as exc:
             messagebox.showwarning(APP_NAME, f"아이콘 생성 실패:\n{exc}")
 
+    def hide_to_tray(self, show_warning: bool = True, force: bool = False) -> None:
+        if self.tray_icon and self.tray_icon.show():
+            self.root.withdraw()
+            return
+        if force:
+            self.root.withdraw()
+            return
+        if show_warning:
+            messagebox.showwarning(APP_NAME, "트레이 아이콘을 만들 수 없습니다.")
+
+    def show_from_tray(self) -> None:
+        if self.tray_icon:
+            self.tray_icon.hide()
+        self.root.deiconify()
+        self.root.state("normal")
+        self.root.lift()
+        self.root.after(50, self.root.focus_force)
+
     def set_status(self, text: str) -> None:
         self.status_var.set(text)
 
     def quit(self) -> None:
+        if self.tray_icon:
+            self.tray_icon.destroy()
+            self.tray_icon = None
         if self.refresh_after_id:
             self.root.after_cancel(self.refresh_after_id)
         if self.hotkey_service:
@@ -819,6 +1344,21 @@ def run_cli(args: argparse.Namespace) -> int:
                 raise ValueError(f"Unknown environment: {args.launch}")
             launch_environment(config, env_key)
             return 0
+        if args.launch_oi:
+            target = args.launch_oi.strip()
+            entries = config.get("oi_entries", [])
+            selected_index = None
+            if target.isdigit():
+                selected_index = max(0, int(target) - 1)
+            else:
+                for index, entry in enumerate(entries):
+                    if str(entry.get("name", "")).strip().lower() == target.lower():
+                        selected_index = index
+                        break
+            if selected_index is None:
+                raise ValueError(f"Unknown OI entry: {args.launch_oi}")
+            launch_oi_entry(config, selected_index)
+            return 0
     except Exception as exc:
         show_windows_error(str(exc))
         return 1
@@ -828,6 +1368,7 @@ def run_cli(args: argparse.Namespace) -> int:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=APP_NAME)
     parser.add_argument("--launch", choices=["NRD", "MEM", "MEMORY", "NRDK", "nrd", "mem", "memory", "nrdk"], help="Launch a configured GPM environment.")
+    parser.add_argument("--launch-oi", help="Launch a configured OI entry by name or index.")
     parser.add_argument("--refresh-only", action="store_true", help="Refresh workspace session and exit.")
     parser.add_argument("--background", action="store_true", help="Start hidden in the background.")
     return parser
@@ -835,7 +1376,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-    if args.launch or args.refresh_only:
+    if args.launch or args.launch_oi or args.refresh_only:
         return run_cli(args)
     close_other_gui_instances()
     return LauncherApp(background=args.background).run()
