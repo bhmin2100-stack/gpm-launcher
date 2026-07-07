@@ -65,25 +65,20 @@ ENVIRONMENTS = [
 ]
 
 DEFAULT_HOTKEYS = {
-    "NRD": "Ctrl+Alt+Shift+N",
-    "MEMORY": "Ctrl+Alt+Shift+M",
-    "NRDK": "Ctrl+Alt+Shift+K",
-}
-
-OLD_DEFAULT_HOTKEYS = {
-    "NRD": "Ctrl+Alt+1",
-    "MEMORY": "Ctrl+Alt+2",
-    "NRDK": "Ctrl+Alt+3",
+    "NRD": "",
+    "MEMORY": "",
+    "NRDK": "",
 }
 
 DEFAULT_OI_ENTRIES = [
-    {"name": "NRD", "url": "", "hotkey": "Ctrl+Alt+Shift+O"},
+    {"name": "NRD", "url": "", "hotkey": ""},
 ]
 
 DEFAULT_AGREEMENT_ENTRIES = [
     {"name": "NRD", "url": "", "hotkey": ""},
     {"name": "NRDK", "url": "", "hotkey": ""},
 ]
+HOTKEY_CAPTURE_PROMPT = "키를 누르세요"
 
 DEFAULT_GPM_ENTRIES = [
     {"name": env["label"], "url": "", "hotkey": DEFAULT_HOTKEYS[env["key"]]}
@@ -246,8 +241,6 @@ def merge_config(target: dict, saved: dict) -> None:
                 if isinstance(saved_mdm.get(env_key), dict):
                     entry["url"] = str(saved_mdm[env_key].get("url", "") or "")
                     entry["hotkey"] = str(saved_mdm[env_key].get("hotkey", DEFAULT_HOTKEYS[env_key]) or "")
-                    if entry["hotkey"] == OLD_DEFAULT_HOTKEYS[env_key]:
-                        entry["hotkey"] = DEFAULT_HOTKEYS[env_key]
                 migrated.append(entry)
             target["gpm_entries"] = migrated
 
@@ -1388,8 +1381,8 @@ class LauncherApp:
     def __init__(self, background: bool = False) -> None:
         self.root = tk.Tk()
         self.root.title(APP_NAME)
-        self.root.geometry("920x820")
-        self.root.minsize(820, 720)
+        self.root.geometry("1280x760")
+        self.root.minsize(1100, 680)
         ico = resource_base_dir() / "assets" / "gpm_launcher.ico"
         if ico.exists():
             try:
@@ -1406,6 +1399,7 @@ class LauncherApp:
         self.tray_icon: TrayIcon | None = None
         self.hotkey_capture_var: tk.StringVar | None = None
         self.hotkey_capture_modifiers: set[str] = set()
+        self.hotkey_capture_original_value = ""
 
         self._build_ui()
         self._load_config_to_ui()
@@ -1432,24 +1426,24 @@ class LauncherApp:
 
         body = ttk.Frame(outer)
         body.grid(row=1, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=1)
-        body.rowconfigure(1, weight=1)
-        body.rowconfigure(2, weight=1)
-        body.rowconfigure(3, weight=1)
+        body.columnconfigure(0, weight=1, uniform="main")
+        body.columnconfigure(1, weight=1, uniform="main")
+        body.rowconfigure(0, weight=1, uniform="main")
+        body.rowconfigure(1, weight=1, uniform="main")
 
-        self._build_workspace_frame(body)
-        self._build_gpm_frame(body)
-        self._build_oi_frame(body)
-        self._build_agreement_frame(body)
+        self._build_workspace_frame(body, row=0, column=0)
+        self._build_gpm_frame(body, row=1, column=0)
+        self._build_oi_frame(body, row=0, column=1)
+        self._build_agreement_frame(body, row=1, column=1)
         self._build_button_row(outer)
 
         self.status_var = tk.StringVar(value="준비됨")
         status = ttk.Label(outer, textvariable=self.status_var, anchor="w")
         status.grid(row=3, column=0, sticky="ew", pady=(8, 0))
 
-    def _build_workspace_frame(self, parent: ttk.Frame) -> None:
+    def _build_workspace_frame(self, parent: ttk.Frame, row: int, column: int) -> None:
         frame = ttk.LabelFrame(parent, text="Workspace", padding=10)
-        frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        frame.grid(row=row, column=column, sticky="nsew", padx=(0, 6), pady=(0, 6))
         frame.columnconfigure(1, weight=1)
 
         self.workspace_var = tk.StringVar()
@@ -1480,9 +1474,9 @@ class LauncherApp:
 
         ttk.Checkbutton(frame, text="Windows 시작 시 백그라운드 실행", variable=self.startup_var).grid(row=3, column=1, sticky="w", pady=3)
 
-    def _build_gpm_frame(self, parent: ttk.Frame) -> None:
+    def _build_gpm_frame(self, parent: ttk.Frame, row: int, column: int) -> None:
         frame = ttk.LabelFrame(parent, text="GPM", padding=10)
-        frame.grid(row=1, column=0, sticky="nsew")
+        frame.grid(row=row, column=column, sticky="nsew", padx=(0, 6), pady=(6, 0))
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(1, weight=1)
 
@@ -1501,18 +1495,17 @@ class LauncherApp:
         gpm_url_entry.bind("<FocusOut>", lambda _event=None: self._normalize_gpm_editor_url())
         gpm_url_entry.bind("<<Paste>>", lambda _event=None: self.root.after(80, self._normalize_gpm_editor_url))
         ttk.Label(editor, text="단축키").grid(row=0, column=4, sticky="e", padx=(0, 6))
-        ttk.Entry(editor, textvariable=self.gpm_hotkey_var, width=18).grid(row=0, column=5, sticky="w")
-        ttk.Button(editor, text="키 입력", command=lambda: self.start_hotkey_capture(self.gpm_hotkey_var)).grid(row=0, column=6, sticky="w", padx=(6, 0))
+        self._create_hotkey_entry(editor, self.gpm_hotkey_var).grid(row=0, column=5, sticky="w")
 
         self.gpm_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey", "icon"), show="headings", height=4)
         self.gpm_tree.heading("name", text="이름")
         self.gpm_tree.heading("url", text="MDM 주소")
         self.gpm_tree.heading("hotkey", text="단축키")
         self.gpm_tree.heading("icon", text="아이콘")
-        self.gpm_tree.column("name", width=120, stretch=False)
-        self.gpm_tree.column("url", width=360, stretch=True)
-        self.gpm_tree.column("hotkey", width=150, stretch=False)
-        self.gpm_tree.column("icon", width=90, stretch=False, anchor="center")
+        self.gpm_tree.column("name", width=90, stretch=False)
+        self.gpm_tree.column("url", width=260, stretch=True)
+        self.gpm_tree.column("hotkey", width=120, stretch=False)
+        self.gpm_tree.column("icon", width=80, stretch=False, anchor="center")
         self.gpm_tree.grid(row=1, column=0, columnspan=4, sticky="nsew")
         self.gpm_tree.bind("<<TreeviewSelect>>", lambda _event=None: self._load_selected_gpm_to_editor())
         self.gpm_tree.bind("<ButtonRelease-1>", self._handle_gpm_tree_click)
@@ -1527,9 +1520,9 @@ class LauncherApp:
         hint = ttk.Label(frame, text="GPM 임시 주소나 curl://launch/... 주소를 붙여넣으면 자동으로 실행 주소만 정리합니다.", foreground="#555")
         hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
-    def _build_oi_frame(self, parent: ttk.Frame) -> None:
+    def _build_oi_frame(self, parent: ttk.Frame, row: int, column: int) -> None:
         frame = ttk.LabelFrame(parent, text="OI", padding=10)
-        frame.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        frame.grid(row=row, column=column, sticky="nsew", padx=(6, 0), pady=(0, 6))
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(1, weight=1)
 
@@ -1548,18 +1541,17 @@ class LauncherApp:
         oi_url_entry.bind("<FocusOut>", lambda _event=None: self._normalize_oi_editor_url())
         oi_url_entry.bind("<<Paste>>", lambda _event=None: self.root.after(80, self._normalize_oi_editor_url))
         ttk.Label(editor, text="단축키").grid(row=0, column=4, sticky="e", padx=(0, 6))
-        ttk.Entry(editor, textvariable=self.oi_hotkey_var, width=18).grid(row=0, column=5, sticky="w")
-        ttk.Button(editor, text="키 입력", command=lambda: self.start_hotkey_capture(self.oi_hotkey_var)).grid(row=0, column=6, sticky="w", padx=(6, 0))
+        self._create_hotkey_entry(editor, self.oi_hotkey_var).grid(row=0, column=5, sticky="w")
 
         self.oi_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey", "icon"), show="headings", height=4)
         self.oi_tree.heading("name", text="이름")
         self.oi_tree.heading("url", text="주소")
         self.oi_tree.heading("hotkey", text="단축키")
         self.oi_tree.heading("icon", text="아이콘")
-        self.oi_tree.column("name", width=120, stretch=False)
-        self.oi_tree.column("url", width=360, stretch=True)
-        self.oi_tree.column("hotkey", width=150, stretch=False)
-        self.oi_tree.column("icon", width=90, stretch=False, anchor="center")
+        self.oi_tree.column("name", width=90, stretch=False)
+        self.oi_tree.column("url", width=260, stretch=True)
+        self.oi_tree.column("hotkey", width=120, stretch=False)
+        self.oi_tree.column("icon", width=80, stretch=False, anchor="center")
         self.oi_tree.grid(row=1, column=0, columnspan=4, sticky="nsew")
         self.oi_tree.bind("<<TreeviewSelect>>", lambda _event=None: self._load_selected_oi_to_editor())
         self.oi_tree.bind("<ButtonRelease-1>", self._handle_oi_tree_click)
@@ -1574,9 +1566,9 @@ class LauncherApp:
         hint = ttk.Label(frame, text="OI는 주소창 없는 앱 창으로 열립니다. 작업표시줄 분리를 위해 항목별 바로가기를 만들어 실행합니다.", foreground="#555")
         hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
-    def _build_agreement_frame(self, parent: ttk.Frame) -> None:
+    def _build_agreement_frame(self, parent: ttk.Frame, row: int, column: int) -> None:
         frame = ttk.LabelFrame(parent, text="합의", padding=10)
-        frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
+        frame.grid(row=row, column=column, sticky="nsew", padx=(6, 0), pady=(6, 0))
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(1, weight=1)
 
@@ -1595,18 +1587,17 @@ class LauncherApp:
         agreement_url_entry.bind("<FocusOut>", lambda _event=None: self._normalize_agreement_editor_url())
         agreement_url_entry.bind("<<Paste>>", lambda _event=None: self.root.after(80, self._normalize_agreement_editor_url))
         ttk.Label(editor, text="단축키").grid(row=0, column=4, sticky="e", padx=(0, 6))
-        ttk.Entry(editor, textvariable=self.agreement_hotkey_var, width=18).grid(row=0, column=5, sticky="w")
-        ttk.Button(editor, text="키 입력", command=lambda: self.start_hotkey_capture(self.agreement_hotkey_var)).grid(row=0, column=6, sticky="w", padx=(6, 0))
+        self._create_hotkey_entry(editor, self.agreement_hotkey_var).grid(row=0, column=5, sticky="w")
 
         self.agreement_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey", "icon"), show="headings", height=4)
         self.agreement_tree.heading("name", text="이름")
         self.agreement_tree.heading("url", text="주소")
         self.agreement_tree.heading("hotkey", text="단축키")
         self.agreement_tree.heading("icon", text="아이콘")
-        self.agreement_tree.column("name", width=120, stretch=False)
-        self.agreement_tree.column("url", width=360, stretch=True)
-        self.agreement_tree.column("hotkey", width=150, stretch=False)
-        self.agreement_tree.column("icon", width=90, stretch=False, anchor="center")
+        self.agreement_tree.column("name", width=90, stretch=False)
+        self.agreement_tree.column("url", width=260, stretch=True)
+        self.agreement_tree.column("hotkey", width=120, stretch=False)
+        self.agreement_tree.column("icon", width=80, stretch=False, anchor="center")
         self.agreement_tree.grid(row=1, column=0, columnspan=4, sticky="nsew")
         self.agreement_tree.bind("<<TreeviewSelect>>", lambda _event=None: self._load_selected_agreement_to_editor())
         self.agreement_tree.bind("<ButtonRelease-1>", self._handle_agreement_tree_click)
@@ -1638,6 +1629,20 @@ class LauncherApp:
         entry.bind("<Control-v>", normalize_later)
         entry.bind("<FocusOut>", normalize_later)
 
+    def _create_hotkey_entry(self, parent: tk.Widget, var: tk.StringVar) -> ttk.Entry:
+        entry = ttk.Entry(parent, textvariable=var, width=18, state="readonly")
+
+        def start_capture(_event=None) -> None:
+            self.root.after_idle(lambda: self.start_hotkey_capture(var))
+
+        def restore_if_unfinished(_event=None) -> None:
+            self._restore_hotkey_capture_if_target(var)
+
+        entry.bind("<FocusIn>", start_capture)
+        entry.bind("<Button-1>", start_capture)
+        entry.bind("<FocusOut>", restore_if_unfinished)
+        return entry
+
     def _normalize_var(self, var: tk.StringVar) -> None:
         before = var.get()
         after = normalize_mdm_url(before)
@@ -1646,29 +1651,44 @@ class LauncherApp:
             self.set_status("주소를 curl 실행 주소로 정리했습니다.")
 
     def start_hotkey_capture(self, target_var: tk.StringVar) -> None:
-        self.stop_hotkey_capture()
+        if self.hotkey_capture_var is target_var:
+            return
+        self.stop_hotkey_capture(restore_original=True)
         self.hotkey_capture_var = target_var
         self.hotkey_capture_modifiers = set()
-        target_var.set("키를 누르세요")
-        self.set_status("등록할 단축키 조합을 누르세요. Esc는 취소입니다.")
+        self.hotkey_capture_original_value = target_var.get()
+        target_var.set(HOTKEY_CAPTURE_PROMPT)
+        self.set_status("등록할 단축키 조합을 누르세요. Esc는 취소, Backspace/Delete는 삭제입니다.")
         self.root.bind_all("<KeyPress>", self._capture_hotkey_event)
         self.root.bind_all("<KeyRelease>", self._release_hotkey_modifier)
-        self.root.focus_force()
 
-    def stop_hotkey_capture(self) -> None:
+    def stop_hotkey_capture(self, restore_original: bool = False) -> None:
         if self.hotkey_capture_var is not None:
+            target_var = self.hotkey_capture_var
+            original_value = self.hotkey_capture_original_value
             self.root.unbind_all("<KeyPress>")
             self.root.unbind_all("<KeyRelease>")
             self.hotkey_capture_var = None
             self.hotkey_capture_modifiers = set()
+            self.hotkey_capture_original_value = ""
+            if restore_original and target_var.get() == HOTKEY_CAPTURE_PROMPT:
+                target_var.set(original_value)
+
+    def _restore_hotkey_capture_if_target(self, target_var: tk.StringVar) -> None:
+        if self.hotkey_capture_var is target_var:
+            self.stop_hotkey_capture(restore_original=True)
 
     def _capture_hotkey_event(self, event) -> str:
         if self.hotkey_capture_var is None:
             return "break"
         if event.keysym == "Escape":
+            self.stop_hotkey_capture(restore_original=True)
+            self.set_status("단축키 입력을 취소했습니다.")
+            return "break"
+        if event.keysym in {"BackSpace", "Delete"}:
             self.hotkey_capture_var.set("")
             self.stop_hotkey_capture()
-            self.set_status("단축키 입력을 취소했습니다.")
+            self.set_status("단축키를 비웠습니다.")
             return "break"
 
         key = self._hotkey_key_name(event.keysym)
@@ -1780,6 +1800,7 @@ class LauncherApp:
         self.gpm_hotkey_var.set(entry.get("hotkey", ""))
 
     def add_or_update_gpm(self) -> None:
+        self.stop_hotkey_capture(restore_original=True)
         name = safe_name(self.gpm_name_var.get(), f"GPM {len(self.gpm_entries) + 1}")
         url = normalize_mdm_url(self.gpm_url_var.get())
         hotkey = self.gpm_hotkey_var.get().strip()
@@ -1875,6 +1896,7 @@ class LauncherApp:
         self.oi_hotkey_var.set(entry.get("hotkey", ""))
 
     def add_or_update_oi(self) -> None:
+        self.stop_hotkey_capture(restore_original=True)
         name = safe_name(self.oi_name_var.get(), f"OI {len(self.oi_entries) + 1}")
         url = normalize_web_url(self.oi_url_var.get())
         hotkey = self.oi_hotkey_var.get().strip()
@@ -1970,6 +1992,7 @@ class LauncherApp:
         self.agreement_hotkey_var.set(entry.get("hotkey", ""))
 
     def add_or_update_agreement(self) -> None:
+        self.stop_hotkey_capture(restore_original=True)
         name = safe_name(self.agreement_name_var.get(), f"합의 {len(self.agreement_entries) + 1}")
         url = normalize_web_url(self.agreement_url_var.get())
         hotkey = self.agreement_hotkey_var.get().strip()
@@ -2072,6 +2095,7 @@ class LauncherApp:
         return config
 
     def save_from_ui(self, silent: bool = False) -> None:
+        self.stop_hotkey_capture(restore_original=True)
         self.config = self.read_from_ui()
         save_config(self.config)
         try:
