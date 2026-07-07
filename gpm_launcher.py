@@ -56,6 +56,7 @@ LR_LOADFROMFILE = 0x00000010
 LR_DEFAULTSIZE = 0x00000040
 MF_STRING = 0x00000000
 TPM_RIGHTBUTTON = 0x00000002
+TPM_RETURNCMD = 0x00000100
 ID_TRAY_SHOW = 1001
 ID_TRAY_EXIT = 1002
 
@@ -170,7 +171,7 @@ user32.CreatePopupMenu.restype = wintypes.HMENU
 user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
 user32.AppendMenuW.restype = wintypes.BOOL
 user32.TrackPopupMenu.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND, ctypes.c_void_p]
-user32.TrackPopupMenu.restype = wintypes.BOOL
+user32.TrackPopupMenu.restype = ctypes.c_int
 user32.DestroyMenu.argtypes = [wintypes.HMENU]
 user32.DestroyMenu.restype = wintypes.BOOL
 user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
@@ -575,12 +576,48 @@ def title_matches_entry(title: str, entry: dict, kind: str, index: int) -> bool:
         return False
     name = safe_name(entry.get("name", ""), f"{kind.upper()} {index + 1}").lower()
     if kind == "oi":
-        return bool(name and len(name) >= 2 and name in lowered and title_has_oi_marker(lowered) and not title_has_gpm_marker(lowered))
+        return oi_title_matches_entry(lowered, name)
     if kind == "agreement":
         return bool(name and len(name) >= 2 and name in lowered and title_has_agreement_marker(lowered) and not title_has_gpm_marker(lowered) and not title_has_oi_marker(lowered))
     if kind == "gpm":
-        return bool(name and len(name) >= 2 and name in lowered and title_has_gpm_marker(lowered) and not title_has_oi_marker(lowered))
+        return gpm_title_matches_entry(lowered, name)
     return False
+
+
+def gpm_title_matches_entry(lowered_title: str, lowered_name: str) -> bool:
+    if not lowered_name or len(lowered_name) < 2 or title_has_oi_marker(lowered_title):
+        return False
+    if is_nrdk_entry_name(lowered_name) and title_has_nrdk_runtime_marker(lowered_title):
+        return True
+    if is_nrd_entry_name(lowered_name) and title_has_nrdk_runtime_marker(lowered_title):
+        return False
+    return lowered_name in lowered_title and title_has_gpm_marker(lowered_title)
+
+
+def oi_title_matches_entry(lowered_title: str, lowered_name: str) -> bool:
+    if not lowered_name or len(lowered_name) < 2 or title_has_gpm_marker(lowered_title):
+        return False
+    if is_nrdk_entry_name(lowered_name) and title_has_nrdk_oi_runtime_marker(lowered_title):
+        return True
+    if is_nrd_entry_name(lowered_name) and title_has_nrdk_oi_runtime_marker(lowered_title):
+        return False
+    return lowered_name in lowered_title and title_has_oi_marker(lowered_title)
+
+
+def is_nrd_entry_name(lowered_name: str) -> bool:
+    return bool(re.search(r"\bnrd\b", lowered_name))
+
+
+def is_nrdk_entry_name(lowered_name: str) -> bool:
+    return bool(re.search(r"\bnrdk\b", lowered_name))
+
+
+def title_has_nrdk_runtime_marker(lowered_title: str) -> bool:
+    return bool(re.search(r"\bnext[._ -]*nrd\b", lowered_title))
+
+
+def title_has_nrdk_oi_runtime_marker(lowered_title: str) -> bool:
+    return bool(re.search(r"\bnrd[._ -]*k1\b", lowered_title))
 
 
 def title_has_gpm_marker(title: str) -> bool:
@@ -1371,6 +1408,10 @@ class TrayIcon:
             return 0
 
         if message == WM_COMMAND:
+            if int(lparam):
+                if self.old_wndproc:
+                    return user32.CallWindowProcW(self.old_wndproc, hwnd, message, wparam, lparam)
+                return 0
             command_id = int(wparam) & 0xFFFF
             if command_id == ID_TRAY_SHOW:
                 self.root.after(0, self.on_show)
@@ -1395,7 +1436,11 @@ class TrayIcon:
             user32.AppendMenuW(menu, MF_STRING, ID_TRAY_SHOW, "열기")
             user32.AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, "종료")
             user32.SetForegroundWindow(self.hwnd)
-            user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, self.hwnd, None)
+            command_id = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, point.x, point.y, 0, self.hwnd, None)
+            if command_id == ID_TRAY_SHOW:
+                self.root.after(0, self.on_show)
+            elif command_id == ID_TRAY_EXIT:
+                self.root.after(0, self.on_exit)
             user32.PostMessageW(self.hwnd, WM_NULL, 0, 0)
         finally:
             user32.DestroyMenu(menu)
