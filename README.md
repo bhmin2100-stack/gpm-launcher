@@ -14,6 +14,8 @@ Windows launcher for the company GPM Curl applications.
 - Remembers windows opened from registered GPM/OI entries and brings the existing window to the front instead of opening another one.
 - Adds configurable OI entries with user-defined names, URLs, and hotkeys.
 - Opens OI pages in browser app mode without the normal address bar or toolbar, using the normal Edge/Chrome profile for SSO.
+- Adds configurable agreement links, such as NRD and NRDK agreement pages, with the same URL and hotkey workflow as OI.
+- Generates per-entry shortcut icons that include the GPM/OI/agreement type and the user-defined entry name.
 - Can hide to the Windows tray and restore from the tray icon.
 - Uses a lightweight basic Windows GUI and can start with Windows.
 - Automatically extracts the `curl://launch/...` target when a workspace launch URL is pasted.

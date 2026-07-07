@@ -24,6 +24,7 @@ WINDOW_CACHE_PATH = CONFIG_DIR / "window-cache.json"
 LEGACY_CONFIG_PATH = Path(__file__).resolve().parent / "gpm-launcher.config.json"
 HOTKEY_BASE_ID = 0x4700
 OI_HOTKEY_BASE_ID = 0x4800
+AGREEMENT_HOTKEY_BASE_ID = 0x4900
 WM_HOTKEY = 0x0312
 WM_COMMAND = 0x0111
 WM_NULL = 0x0000
@@ -77,6 +78,11 @@ OLD_DEFAULT_HOTKEYS = {
 
 DEFAULT_OI_ENTRIES = [
     {"name": "NRD", "url": "", "hotkey": "Ctrl+Alt+Shift+O"},
+]
+
+DEFAULT_AGREEMENT_ENTRIES = [
+    {"name": "NRD", "url": "", "hotkey": ""},
+    {"name": "NRDK", "url": "", "hotkey": ""},
 ]
 
 DEFAULT_GPM_ENTRIES = [
@@ -207,6 +213,7 @@ def default_config() -> dict:
         "start_with_windows": True,
         "gpm_entries": [entry.copy() for entry in DEFAULT_GPM_ENTRIES],
         "oi_entries": [entry.copy() for entry in DEFAULT_OI_ENTRIES],
+        "agreement_entries": [entry.copy() for entry in DEFAULT_AGREEMENT_ENTRIES],
     }
 
 
@@ -256,6 +263,19 @@ def merge_config(target: dict, saved: dict) -> None:
             if name or url or hotkey:
                 entries.append({"name": name, "url": url, "hotkey": hotkey})
         target["oi_entries"] = entries
+
+    saved_agreement = saved.get("agreement_entries", [])
+    if "agreement_entries" in saved and isinstance(saved_agreement, list):
+        entries = []
+        for item in saved_agreement:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            url = str(item.get("url", "")).strip()
+            hotkey = str(item.get("hotkey", "")).strip()
+            if name or url or hotkey:
+                entries.append({"name": name, "url": url, "hotkey": hotkey})
+        target["agreement_entries"] = entries
 
 
 def load_config() -> dict:
@@ -435,6 +455,10 @@ def normalized_entry_url(kind: str, entry: dict) -> str:
     return normalize_web_url(entry.get("url", ""))
 
 
+def kind_display_name(kind: str) -> str:
+    return {"gpm": "GPM", "oi": "OI", "agreement": "합의"}.get(kind, kind.upper())
+
+
 def window_cache_key(kind: str, entry: dict, index: int) -> str:
     name = safe_name(entry.get("name", ""), f"{kind.upper()} {index + 1}")
     identity = f"{kind}|{name}|{normalized_entry_url(kind, entry)}"
@@ -543,11 +567,11 @@ def cached_window_matches_entry(hwnd: int, kind: str, entry: dict, index: int) -
     title = get_window_text(hwnd)
     if not title:
         return False
-    if kind == "oi":
+    if kind in {"oi", "agreement"}:
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(handle, ctypes.byref(pid))
         command_line = get_process_command_lines({int(pid.value)}).get(int(pid.value), "")
-        return command_line_matches_oi(command_line, entry) or title_matches_entry(title, entry, kind, index)
+        return command_line_matches_web_entry(command_line, entry) or title_matches_entry(title, entry, kind, index)
     return title_matches_entry(title, entry, kind, index)
 
 
@@ -558,6 +582,8 @@ def title_matches_entry(title: str, entry: dict, kind: str, index: int) -> bool:
     name = safe_name(entry.get("name", ""), f"{kind.upper()} {index + 1}").lower()
     if kind == "oi":
         return bool(name and len(name) >= 2 and name in lowered and title_has_oi_marker(lowered) and not title_has_gpm_marker(lowered))
+    if kind == "agreement":
+        return bool(name and len(name) >= 2 and name in lowered and title_has_agreement_marker(lowered) and not title_has_gpm_marker(lowered) and not title_has_oi_marker(lowered))
     if kind == "gpm":
         return bool(name and len(name) >= 2 and name in lowered and title_has_gpm_marker(lowered) and not title_has_oi_marker(lowered))
     return False
@@ -569,6 +595,10 @@ def title_has_gpm_marker(title: str) -> bool:
 
 def title_has_oi_marker(title: str) -> bool:
     return bool(re.search(r"\bo\s*/\s*i\b|\boi\b", title, flags=re.IGNORECASE))
+
+
+def title_has_agreement_marker(title: str) -> bool:
+    return "합의" in title or bool(re.search(r"\bagreement\b", title, flags=re.IGNORECASE))
 
 
 def get_process_command_lines(pids: set[int]) -> dict[int, str]:
@@ -619,7 +649,7 @@ def get_process_command_lines(pids: set[int]) -> dict[int, str]:
     return command_lines
 
 
-def command_line_matches_oi(command_line: str, entry: dict) -> bool:
+def command_line_matches_web_entry(command_line: str, entry: dict) -> bool:
     url = normalize_web_url(entry.get("url", ""))
     if not url:
         return False
@@ -639,10 +669,10 @@ def focus_existing_entry_window(kind: str, entry: dict, index: int, config: dict
         return True
 
     windows = enumerate_visible_windows()
-    if kind == "oi":
+    if kind in {"oi", "agreement"}:
         command_lines = get_process_command_lines({window["pid"] for window in windows})
         for window in windows:
-            if command_line_matches_oi(command_lines.get(window["pid"], ""), entry):
+            if command_line_matches_web_entry(command_lines.get(window["pid"], ""), entry):
                 cache_entry_window(kind, entry, index, window["hwnd"])
                 return focus_window(window["hwnd"])
 
@@ -659,10 +689,10 @@ def pick_new_entry_window(kind: str, entry: dict, before_handles: set[int]) -> d
     if not windows:
         return None
 
-    if kind == "oi":
+    if kind in {"oi", "agreement"}:
         command_lines = get_process_command_lines({window["pid"] for window in windows})
         for window in windows:
-            if command_line_matches_oi(command_lines.get(window["pid"], ""), entry):
+            if command_line_matches_web_entry(command_lines.get(window["pid"], ""), entry):
                 return window
 
     for window in windows:
@@ -806,6 +836,104 @@ def oi_icon_location() -> str:
     return icon_location()
 
 
+def generated_icon_location(kind: str, entry: dict) -> str:
+    fallback = oi_icon_location() if kind in {"oi", "agreement"} else icon_location()
+    name = safe_name(entry.get("name", ""), kind_display_name(kind))
+    digest = hashlib.sha1(f"{kind}|{name}|{normalized_entry_url(kind, entry)}".encode("utf-8", errors="ignore")).hexdigest()[:12]
+    icon_dir = CONFIG_DIR / "icons"
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    icon_path = icon_dir / f"{kind}-{slug_name(name, kind)}-{digest}.ico"
+    if icon_path.exists():
+        return str(icon_path)
+
+    specs = {
+        "gpm": ("GPM", (27, 94, 170, 255), (40, 163, 106, 255)),
+        "oi": ("OI", (38, 76, 89, 255), (42, 126, 161, 255)),
+        "agreement": ("합의", (92, 64, 140, 255), (48, 132, 130, 255)),
+    }
+    main_text, top_color, bottom_color = specs.get(kind, specs["gpm"])
+    label = icon_label(name)
+    try:
+        create_icon_with_powershell(icon_path, main_text, label, top_color, bottom_color)
+        return str(icon_path) if icon_path.exists() else fallback
+    except Exception:
+        return fallback
+
+
+def icon_label(value: str) -> str:
+    text = re.sub(r"[^0-9A-Za-z가-힣]+", "", value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 5:
+        return text.upper()
+    uppercase = "".join(ch for ch in text if ch.isupper() or ch.isdigit())
+    if 2 <= len(uppercase) <= 5:
+        return uppercase
+    return text[:5].upper()
+
+
+def create_icon_with_powershell(icon_path: Path, main_text: str, label: str, top_color: tuple[int, int, int, int], bottom_color: tuple[int, int, int, int]) -> None:
+    main_size = 86 if len(main_text) <= 2 else 58
+    label_size = 42 if len(label) <= 4 else 32
+    script = f"""
+Add-Type -AssemblyName System.Drawing
+$path = {ps_quote(str(icon_path))}
+$mainText = {ps_quote(main_text)}
+$labelText = {ps_quote(label)}
+$bitmap = New-Object System.Drawing.Bitmap 256, 256
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+$graphics.Clear([System.Drawing.Color]::Transparent)
+$topBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb({top_color[3]}, {top_color[0]}, {top_color[1]}, {top_color[2]}))
+$bottomBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb({bottom_color[3]}, {bottom_color[0]}, {bottom_color[1]}, {bottom_color[2]}))
+$whiteBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)
+$pathShape = New-Object System.Drawing.Drawing2D.GraphicsPath
+$r = 44
+$pathShape.AddArc(16, 16, $r, $r, 180, 90)
+$pathShape.AddArc(196, 16, $r, $r, 270, 90)
+$pathShape.AddArc(196, 196, $r, $r, 0, 90)
+$pathShape.AddArc(16, 196, $r, $r, 90, 90)
+$pathShape.CloseFigure()
+$graphics.FillPath($topBrush, $pathShape)
+$graphics.FillRectangle($bottomBrush, 16, 164, 224, 76)
+$format = New-Object System.Drawing.StringFormat
+$format.Alignment = [System.Drawing.StringAlignment]::Center
+$format.LineAlignment = [System.Drawing.StringAlignment]::Center
+$mainFont = New-Object System.Drawing.Font('Malgun Gothic', {main_size}, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+$labelFont = New-Object System.Drawing.Font('Malgun Gothic', {label_size}, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+$graphics.DrawString($mainText, $mainFont, $whiteBrush, (New-Object System.Drawing.RectangleF 16, 34, 224, 120), $format)
+$graphics.DrawString($labelText, $labelFont, $whiteBrush, (New-Object System.Drawing.RectangleF 16, 168, 224, 68), $format)
+$memory = New-Object System.IO.MemoryStream
+$bitmap.Save($memory, [System.Drawing.Imaging.ImageFormat]::Png)
+$png = $memory.ToArray()
+$stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+$writer = New-Object System.IO.BinaryWriter($stream)
+$writer.Write([UInt16]0)
+$writer.Write([UInt16]1)
+$writer.Write([UInt16]1)
+$writer.Write([Byte]0)
+$writer.Write([Byte]0)
+$writer.Write([Byte]0)
+$writer.Write([Byte]0)
+$writer.Write([UInt16]1)
+$writer.Write([UInt16]32)
+$writer.Write([UInt32]$png.Length)
+$writer.Write([UInt32]22)
+$writer.Write($png)
+$writer.Close()
+$stream.Close()
+$graphics.Dispose()
+$bitmap.Dispose()
+"""
+    subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=CREATE_NO_WINDOW,
+    )
+
+
 def launch_command_for_gpm(index: int) -> tuple[str, str, str]:
     launch_arg = str(index + 1)
     if getattr(sys, "frozen", False):
@@ -841,11 +969,19 @@ def oi_shortcut_path(entry: dict, index: int) -> Path:
     return shortcuts_dir / f"{name} OI.lnk"
 
 
-def create_oi_shortcut(entry: dict, index: int, config: dict) -> Path:
-    name = safe_name(entry.get("name", ""), f"OI {index + 1}")
+def web_shortcut_path(kind: str, entry: dict, index: int) -> Path:
+    shortcuts_dir = CONFIG_DIR / f"{kind}-shortcuts"
+    shortcuts_dir.mkdir(parents=True, exist_ok=True)
+    name = safe_name(entry.get("name", ""), f"{kind_display_name(kind)} {index + 1}")
+    return shortcuts_dir / f"{name} {kind_display_name(kind)}.lnk"
+
+
+def create_web_app_shortcut(kind: str, entry: dict, index: int, config: dict, desktop: bool = False) -> Path:
+    label = kind_display_name(kind)
+    name = safe_name(entry.get("name", ""), f"{label} {index + 1}")
     url = normalize_web_url(entry.get("url", ""))
     if not url:
-        raise ValueError(f"{name} OI 주소가 비어 있습니다.")
+        raise ValueError(f"{name} {label} 주소가 비어 있습니다.")
 
     browser_path = resolve_browser_path(config.get("browser") or "default")
     if not browser_path:
@@ -859,34 +995,30 @@ def create_oi_shortcut(entry: dict, index: int, config: dict) -> Path:
             f"--app={quote_arg(url)}",
         ]
     )
-    shortcut = oi_shortcut_path(entry, index)
-    create_shortcut(shortcut, browser_path, args, str(app_base_dir()), oi_icon_location())
+    if desktop:
+        target_dir = get_desktop_path()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shortcut = target_dir / f"{name} {label}.lnk"
+    else:
+        shortcut = web_shortcut_path(kind, entry, index)
+    create_shortcut(shortcut, browser_path, args, str(app_base_dir()), generated_icon_location(kind, entry))
     return shortcut
+
+
+def create_oi_shortcut(entry: dict, index: int, config: dict) -> Path:
+    return create_web_app_shortcut("oi", entry, index, config, desktop=False)
 
 
 def create_oi_desktop_shortcut(entry: dict, index: int, config: dict) -> Path:
-    name = safe_name(entry.get("name", ""), f"OI {index + 1}")
-    url = normalize_web_url(entry.get("url", ""))
-    if not url:
-        raise ValueError(f"{name} OI 주소가 비어 있습니다.")
+    return create_web_app_shortcut("oi", entry, index, config, desktop=True)
 
-    browser_path = resolve_browser_path(config.get("browser") or "default")
-    if not browser_path:
-        raise ValueError("Edge 또는 Chrome을 찾지 못했습니다.")
 
-    args = " ".join(
-        [
-            "--no-first-run",
-            "--disable-default-browser-check",
-            "--start-maximized",
-            f"--app={quote_arg(url)}",
-        ]
-    )
-    desktop = get_desktop_path()
-    desktop.mkdir(parents=True, exist_ok=True)
-    shortcut = desktop / f"{name} OI.lnk"
-    create_shortcut(shortcut, browser_path, args, str(app_base_dir()), oi_icon_location())
-    return shortcut
+def create_agreement_shortcut(entry: dict, index: int, config: dict) -> Path:
+    return create_web_app_shortcut("agreement", entry, index, config, desktop=False)
+
+
+def create_agreement_desktop_shortcut(entry: dict, index: int, config: dict) -> Path:
+    return create_web_app_shortcut("agreement", entry, index, config, desktop=True)
 
 
 def quote_arg(value: str) -> str:
@@ -909,13 +1041,27 @@ def launch_oi_entry(config: dict, index: int) -> str:
     return "launched"
 
 
+def launch_agreement_entry(config: dict, index: int) -> str:
+    entries = config.get("agreement_entries", [])
+    if index < 0 or index >= len(entries):
+        raise ValueError("합의 항목을 찾지 못했습니다.")
+    entry = entries[index]
+    if focus_existing_entry_window("agreement", entry, index, config):
+        return "focused"
+    before_handles = visible_window_handles()
+    shortcut = create_agreement_shortcut(entry, index, config)
+    shell_open(str(shortcut), SW_SHOWNORMAL)
+    remember_new_entry_window_async("agreement", entry, index, before_handles)
+    return "launched"
+
+
 def create_gpm_desktop_shortcut(entry: dict, index: int) -> Path:
     desktop = get_desktop_path()
     desktop.mkdir(parents=True, exist_ok=True)
     name = safe_name(entry.get("name", ""), f"GPM {index + 1}")
     target, args, working_dir = launch_command_for_gpm(index)
     shortcut = desktop / f"{name} GPM.lnk"
-    create_shortcut(shortcut, target, args, working_dir, icon_location())
+    create_shortcut(shortcut, target, args, working_dir, generated_icon_location("gpm", entry))
     return shortcut
 
 
@@ -1202,6 +1348,26 @@ class HotkeyService:
                 else:
                     errors.append(f"OI {name}: 단축키 등록 실패 ({hotkey})")
 
+            for index, entry in enumerate(self.config.get("agreement_entries", [])):
+                if not isinstance(entry, dict):
+                    continue
+                name = safe_name(entry.get("name", ""), f"합의 {index + 1}")
+                if not (entry.get("url") or "").strip():
+                    continue
+                hotkey = (entry.get("hotkey") or "").strip()
+                if not hotkey:
+                    continue
+                try:
+                    modifiers, vk = hotkey_to_native(hotkey)
+                except ValueError as exc:
+                    errors.append(f"합의 {name}: {exc}")
+                    continue
+                hotkey_id = AGREEMENT_HOTKEY_BASE_ID + index
+                if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
+                    registered[hotkey_id] = f"agreement:{index}"
+                else:
+                    errors.append(f"합의 {name}: 단축키 등록 실패 ({hotkey})")
+
             if errors:
                 self.on_errors(errors)
             self.ready.set()
@@ -1222,8 +1388,8 @@ class LauncherApp:
     def __init__(self, background: bool = False) -> None:
         self.root = tk.Tk()
         self.root.title(APP_NAME)
-        self.root.geometry("860x700")
-        self.root.minsize(760, 620)
+        self.root.geometry("920x820")
+        self.root.minsize(820, 720)
         ico = resource_base_dir() / "assets" / "gpm_launcher.ico"
         if ico.exists():
             try:
@@ -1236,8 +1402,10 @@ class LauncherApp:
         self.refresh_after_id: str | None = None
         self.gpm_entries: list[dict] = []
         self.oi_entries: list[dict] = []
+        self.agreement_entries: list[dict] = []
         self.tray_icon: TrayIcon | None = None
         self.hotkey_capture_var: tk.StringVar | None = None
+        self.hotkey_capture_modifiers: set[str] = set()
 
         self._build_ui()
         self._load_config_to_ui()
@@ -1267,10 +1435,12 @@ class LauncherApp:
         body.columnconfigure(0, weight=1)
         body.rowconfigure(1, weight=1)
         body.rowconfigure(2, weight=1)
+        body.rowconfigure(3, weight=1)
 
         self._build_workspace_frame(body)
         self._build_gpm_frame(body)
         self._build_oi_frame(body)
+        self._build_agreement_frame(body)
         self._build_button_row(outer)
 
         self.status_var = tk.StringVar(value="준비됨")
@@ -1334,7 +1504,7 @@ class LauncherApp:
         ttk.Entry(editor, textvariable=self.gpm_hotkey_var, width=18).grid(row=0, column=5, sticky="w")
         ttk.Button(editor, text="키 입력", command=lambda: self.start_hotkey_capture(self.gpm_hotkey_var)).grid(row=0, column=6, sticky="w", padx=(6, 0))
 
-        self.gpm_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey", "icon"), show="headings", height=5)
+        self.gpm_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey", "icon"), show="headings", height=4)
         self.gpm_tree.heading("name", text="이름")
         self.gpm_tree.heading("url", text="MDM 주소")
         self.gpm_tree.heading("hotkey", text="단축키")
@@ -1381,7 +1551,7 @@ class LauncherApp:
         ttk.Entry(editor, textvariable=self.oi_hotkey_var, width=18).grid(row=0, column=5, sticky="w")
         ttk.Button(editor, text="키 입력", command=lambda: self.start_hotkey_capture(self.oi_hotkey_var)).grid(row=0, column=6, sticky="w", padx=(6, 0))
 
-        self.oi_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey", "icon"), show="headings", height=5)
+        self.oi_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey", "icon"), show="headings", height=4)
         self.oi_tree.heading("name", text="이름")
         self.oi_tree.heading("url", text="주소")
         self.oi_tree.heading("hotkey", text="단축키")
@@ -1402,6 +1572,53 @@ class LauncherApp:
         ttk.Button(buttons, text="선택 OI 아이콘 다운로드", command=self.create_selected_oi_icon).pack(side="left", padx=(6, 0))
 
         hint = ttk.Label(frame, text="OI는 주소창 없는 앱 창으로 열립니다. 작업표시줄 분리를 위해 항목별 바로가기를 만들어 실행합니다.", foreground="#555")
+        hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+    def _build_agreement_frame(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text="합의", padding=10)
+        frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        self.agreement_name_var = tk.StringVar()
+        self.agreement_url_var = tk.StringVar()
+        self.agreement_hotkey_var = tk.StringVar()
+
+        editor = ttk.Frame(frame)
+        editor.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 8))
+        editor.columnconfigure(3, weight=1)
+        ttk.Label(editor, text="이름").grid(row=0, column=0, sticky="e", padx=(0, 6))
+        ttk.Entry(editor, textvariable=self.agreement_name_var, width=14).grid(row=0, column=1, sticky="w", padx=(0, 10))
+        ttk.Label(editor, text="주소").grid(row=0, column=2, sticky="e", padx=(0, 6))
+        agreement_url_entry = ttk.Entry(editor, textvariable=self.agreement_url_var)
+        agreement_url_entry.grid(row=0, column=3, sticky="ew", padx=(0, 10))
+        agreement_url_entry.bind("<FocusOut>", lambda _event=None: self._normalize_agreement_editor_url())
+        agreement_url_entry.bind("<<Paste>>", lambda _event=None: self.root.after(80, self._normalize_agreement_editor_url))
+        ttk.Label(editor, text="단축키").grid(row=0, column=4, sticky="e", padx=(0, 6))
+        ttk.Entry(editor, textvariable=self.agreement_hotkey_var, width=18).grid(row=0, column=5, sticky="w")
+        ttk.Button(editor, text="키 입력", command=lambda: self.start_hotkey_capture(self.agreement_hotkey_var)).grid(row=0, column=6, sticky="w", padx=(6, 0))
+
+        self.agreement_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey", "icon"), show="headings", height=4)
+        self.agreement_tree.heading("name", text="이름")
+        self.agreement_tree.heading("url", text="주소")
+        self.agreement_tree.heading("hotkey", text="단축키")
+        self.agreement_tree.heading("icon", text="아이콘")
+        self.agreement_tree.column("name", width=120, stretch=False)
+        self.agreement_tree.column("url", width=360, stretch=True)
+        self.agreement_tree.column("hotkey", width=150, stretch=False)
+        self.agreement_tree.column("icon", width=90, stretch=False, anchor="center")
+        self.agreement_tree.grid(row=1, column=0, columnspan=4, sticky="nsew")
+        self.agreement_tree.bind("<<TreeviewSelect>>", lambda _event=None: self._load_selected_agreement_to_editor())
+        self.agreement_tree.bind("<ButtonRelease-1>", self._handle_agreement_tree_click)
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Button(buttons, text="추가 / 수정", command=self.add_or_update_agreement).pack(side="left")
+        ttk.Button(buttons, text="삭제", command=self.delete_selected_agreement).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="실행", command=self.launch_selected_agreement).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="선택 합의 아이콘 다운로드", command=self.create_selected_agreement_icon).pack(side="left", padx=(6, 0))
+
+        hint = ttk.Label(frame, text="합의 링크는 OI처럼 주소창 없는 앱 창으로 열립니다.", foreground="#555")
         hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     def _build_button_row(self, parent: ttk.Frame) -> None:
@@ -1431,15 +1648,19 @@ class LauncherApp:
     def start_hotkey_capture(self, target_var: tk.StringVar) -> None:
         self.stop_hotkey_capture()
         self.hotkey_capture_var = target_var
+        self.hotkey_capture_modifiers = set()
         target_var.set("키를 누르세요")
         self.set_status("등록할 단축키 조합을 누르세요. Esc는 취소입니다.")
         self.root.bind_all("<KeyPress>", self._capture_hotkey_event)
+        self.root.bind_all("<KeyRelease>", self._release_hotkey_modifier)
         self.root.focus_force()
 
     def stop_hotkey_capture(self) -> None:
         if self.hotkey_capture_var is not None:
             self.root.unbind_all("<KeyPress>")
+            self.root.unbind_all("<KeyRelease>")
             self.hotkey_capture_var = None
+            self.hotkey_capture_modifiers = set()
 
     def _capture_hotkey_event(self, event) -> str:
         if self.hotkey_capture_var is None:
@@ -1454,18 +1675,11 @@ class LauncherApp:
         if not key:
             return "break"
 
-        modifiers = []
-        if event.state & 0x0004:
-            modifiers.append("Ctrl")
-        if event.state & 0x0008:
-            modifiers.append("Alt")
-        if event.state & 0x0001:
-            modifiers.append("Shift")
-        if event.state & 0x0040 or event.state & 0x0080:
-            modifiers.append("Win")
-
         if key in {"Ctrl", "Alt", "Shift", "Win"}:
+            self.hotkey_capture_modifiers.add(key)
             return "break"
+
+        modifiers = self._event_modifiers(event)
         if not modifiers:
             self.set_status("Ctrl, Alt, Shift, Win 중 하나 이상과 같이 누르세요.")
             return "break"
@@ -1475,6 +1689,24 @@ class LauncherApp:
         self.stop_hotkey_capture()
         self.set_status(f"단축키를 {hotkey}로 입력했습니다.")
         return "break"
+
+    def _release_hotkey_modifier(self, event) -> str:
+        key = self._hotkey_key_name(event.keysym)
+        if key in {"Ctrl", "Alt", "Shift", "Win"}:
+            self.hotkey_capture_modifiers.discard(key)
+        return "break"
+
+    def _event_modifiers(self, event) -> list[str]:
+        modifiers = set(self.hotkey_capture_modifiers)
+        if event.state & 0x0004:
+            modifiers.add("Ctrl")
+        if event.state & 0x0008 or event.state & 0x20000:
+            modifiers.add("Alt")
+        if event.state & 0x0001:
+            modifiers.add("Shift")
+        if event.state & 0x0040 or event.state & 0x0080:
+            modifiers.add("Win")
+        return [name for name in ("Ctrl", "Alt", "Shift", "Win") if name in modifiers]
 
     def _hotkey_key_name(self, keysym: str) -> str:
         aliases = {
@@ -1697,6 +1929,101 @@ class LauncherApp:
         except Exception as exc:
             messagebox.showwarning(APP_NAME, f"OI 아이콘 생성 실패:\n{exc}")
 
+    def _normalize_agreement_editor_url(self) -> None:
+        before = self.agreement_url_var.get()
+        after = normalize_web_url(before)
+        if before.strip() and after != before:
+            self.agreement_url_var.set(after)
+            self.set_status("합의 주소를 브라우저 주소로 정리했습니다.")
+
+    def _refresh_agreement_tree(self) -> None:
+        for item in self.agreement_tree.get_children():
+            self.agreement_tree.delete(item)
+        for index, entry in enumerate(self.agreement_entries):
+            self.agreement_tree.insert("", "end", iid=str(index), values=(entry.get("name", ""), entry.get("url", ""), entry.get("hotkey", ""), "다운로드"))
+
+    def _handle_agreement_tree_click(self, event) -> None:
+        if self.agreement_tree.identify_column(event.x) != "#4":
+            return
+        row_id = self.agreement_tree.identify_row(event.y)
+        if not row_id:
+            return
+        self.agreement_tree.selection_set(row_id)
+        self.create_selected_agreement_icon()
+
+    def _selected_agreement_index(self) -> int | None:
+        selection = self.agreement_tree.selection()
+        if not selection:
+            return None
+        try:
+            return int(selection[0])
+        except ValueError:
+            return None
+
+    def _load_selected_agreement_to_editor(self) -> None:
+        index = self._selected_agreement_index()
+        if index is None or index >= len(self.agreement_entries):
+            return
+        entry = self.agreement_entries[index]
+        self.agreement_name_var.set(entry.get("name", ""))
+        self.agreement_url_var.set(entry.get("url", ""))
+        self.agreement_hotkey_var.set(entry.get("hotkey", ""))
+
+    def add_or_update_agreement(self) -> None:
+        name = safe_name(self.agreement_name_var.get(), f"합의 {len(self.agreement_entries) + 1}")
+        url = normalize_web_url(self.agreement_url_var.get())
+        hotkey = self.agreement_hotkey_var.get().strip()
+        if not url:
+            messagebox.showwarning(APP_NAME, "합의 주소를 입력하세요.")
+            return
+        entry = {"name": name, "url": url, "hotkey": hotkey}
+        index = self._selected_agreement_index()
+        if index is None or index >= len(self.agreement_entries):
+            self.agreement_entries.append(entry)
+            index = len(self.agreement_entries) - 1
+        else:
+            self.agreement_entries[index] = entry
+        self._refresh_agreement_tree()
+        self.agreement_tree.selection_set(str(index))
+        self.save_from_ui(silent=True)
+        self.set_status(f"합의 {name} 항목을 저장했습니다.")
+
+    def delete_selected_agreement(self) -> None:
+        index = self._selected_agreement_index()
+        if index is None or index >= len(self.agreement_entries):
+            self.set_status("삭제할 합의 항목을 선택하세요.")
+            return
+        name = self.agreement_entries[index].get("name", f"합의 {index + 1}")
+        del self.agreement_entries[index]
+        self.agreement_name_var.set("")
+        self.agreement_url_var.set("")
+        self.agreement_hotkey_var.set("")
+        self._refresh_agreement_tree()
+        self.save_from_ui(silent=True)
+        self.set_status(f"합의 {name} 항목을 삭제했습니다.")
+
+    def launch_selected_agreement(self) -> None:
+        index = self._selected_agreement_index()
+        if index is None:
+            self.add_or_update_agreement()
+            index = self._selected_agreement_index()
+        if index is not None:
+            self.launch_agreement(index)
+
+    def create_selected_agreement_icon(self) -> None:
+        index = self._selected_agreement_index()
+        if index is None or index >= len(self.agreement_entries):
+            self.set_status("아이콘을 만들 합의 항목을 선택하세요.")
+            return
+        self.save_from_ui(silent=True)
+        try:
+            entry = self.agreement_entries[index]
+            shortcut = create_agreement_desktop_shortcut(entry, index, self.config)
+            messagebox.showinfo(APP_NAME, f"바탕화면 아이콘을 만들었습니다.\n\n{shortcut.name}")
+            self.set_status(f"{shortcut.name} 아이콘을 만들었습니다.")
+        except Exception as exc:
+            messagebox.showwarning(APP_NAME, f"합의 아이콘 생성 실패:\n{exc}")
+
     def _load_config_to_ui(self) -> None:
         self.workspace_var.set(self.config.get("workspace_url", ""))
         self.browser_var.set(self.config.get("browser", "default") or "default")
@@ -1709,6 +2036,8 @@ class LauncherApp:
         self._refresh_gpm_tree()
         self.oi_entries = [entry.copy() for entry in self.config.get("oi_entries", []) if isinstance(entry, dict)]
         self._refresh_oi_tree()
+        self.agreement_entries = [entry.copy() for entry in self.config.get("agreement_entries", []) if isinstance(entry, dict)]
+        self._refresh_agreement_tree()
 
     def read_from_ui(self) -> dict:
         config = default_config()
@@ -1733,6 +2062,13 @@ class LauncherApp:
             hotkey = (entry.get("hotkey") or "").strip()
             if name or url or hotkey:
                 config["oi_entries"].append({"name": name, "url": url, "hotkey": hotkey})
+        config["agreement_entries"] = []
+        for index, entry in enumerate(self.agreement_entries):
+            name = safe_name(entry.get("name", ""), f"합의 {index + 1}")
+            url = normalize_web_url(entry.get("url", ""))
+            hotkey = (entry.get("hotkey") or "").strip()
+            if name or url or hotkey:
+                config["agreement_entries"].append({"name": name, "url": url, "hotkey": hotkey})
         return config
 
     def save_from_ui(self, silent: bool = False) -> None:
@@ -1786,6 +2122,11 @@ class LauncherApp:
                 self.launch_oi(int(action.split(":", 1)[1]))
             except ValueError:
                 self.set_status("OI 단축키 실행 대상을 찾지 못했습니다.")
+        elif action.startswith("agreement:"):
+            try:
+                self.launch_agreement(int(action.split(":", 1)[1]))
+            except ValueError:
+                self.set_status("합의 단축키 실행 대상을 찾지 못했습니다.")
 
     def handle_hotkey_errors(self, errors: list[str], show_errors: bool) -> None:
         self.set_status("일부 단축키 미등록: 이미 쓰는 조합이면 다른 키로 바꿔주세요.")
@@ -1862,6 +2203,19 @@ class LauncherApp:
                 self.set_status(f"OI {name} 실행 요청을 보냈습니다.")
         except Exception as exc:
             messagebox.showwarning(APP_NAME, f"OI 실행 실패:\n{exc}")
+
+    def launch_agreement(self, index: int) -> None:
+        try:
+            self.config = self.read_from_ui()
+            save_config(self.config)
+            result = launch_agreement_entry(self.config, index)
+            name = self.config.get("agreement_entries", [])[index].get("name", f"합의 {index + 1}")
+            if result == "focused":
+                self.set_status(f"합의 {name} 창을 앞으로 가져왔습니다.")
+            else:
+                self.set_status(f"합의 {name} 실행 요청을 보냈습니다.")
+        except Exception as exc:
+            messagebox.showwarning(APP_NAME, f"합의 실행 실패:\n{exc}")
 
     def create_icons(self) -> None:
         self.save_from_ui(silent=True)
@@ -1965,6 +2319,14 @@ def run_cli(args: argparse.Namespace) -> int:
                 raise ValueError(f"Unknown OI entry: {args.launch_oi}")
             launch_oi_entry(config, selected_index)
             return 0
+        if args.launch_agreement:
+            target = args.launch_agreement.strip()
+            entries = config.get("agreement_entries", [])
+            selected_index = resolve_entry_index(entries, target)
+            if selected_index is None:
+                raise ValueError(f"Unknown agreement entry: {args.launch_agreement}")
+            launch_agreement_entry(config, selected_index)
+            return 0
     except Exception as exc:
         show_windows_error(str(exc))
         return 1
@@ -1975,6 +2337,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=APP_NAME)
     parser.add_argument("--launch", help="Launch a configured GPM entry by name or index.")
     parser.add_argument("--launch-oi", help="Launch a configured OI entry by name or index.")
+    parser.add_argument("--launch-agreement", help="Launch a configured agreement entry by name or index.")
     parser.add_argument("--refresh-only", action="store_true", help="Refresh workspace session and exit.")
     parser.add_argument("--background", action="store_true", help="Start hidden in the background.")
     return parser
@@ -1982,7 +2345,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-    if args.launch or args.launch_oi or args.refresh_only:
+    if args.launch or args.launch_oi or args.launch_agreement or args.refresh_only:
         return run_cli(args)
     close_other_gui_instances()
     return LauncherApp(background=args.background).run()
