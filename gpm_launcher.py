@@ -75,6 +75,11 @@ DEFAULT_OI_ENTRIES = [
     {"name": "NRD", "url": "", "hotkey": "Ctrl+Alt+Shift+O"},
 ]
 
+DEFAULT_GPM_ENTRIES = [
+    {"name": env["label"], "url": "", "hotkey": DEFAULT_HOTKEYS[env["key"]]}
+    for env in ENVIRONMENTS
+]
+
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
@@ -178,14 +183,8 @@ def default_config() -> dict:
         "refresh_minutes": 210,
         "refresh_enabled": True,
         "start_with_windows": True,
+        "gpm_entries": [entry.copy() for entry in DEFAULT_GPM_ENTRIES],
         "oi_entries": [entry.copy() for entry in DEFAULT_OI_ENTRIES],
-        "mdm": {
-            env["key"]: {
-                "url": "",
-                "hotkey": DEFAULT_HOTKEYS[env["key"]],
-            }
-            for env in ENVIRONMENTS
-        },
     }
 
 
@@ -194,17 +193,37 @@ def merge_config(target: dict, saved: dict) -> None:
         if key in saved:
             target[key] = saved[key]
 
-    saved_mdm = saved.get("mdm", {})
-    if isinstance(saved_mdm, dict):
-        for env in ENVIRONMENTS:
-            env_key = env["key"]
-            if isinstance(saved_mdm.get(env_key), dict):
-                target["mdm"][env_key].update(saved_mdm[env_key])
-                if target["mdm"][env_key].get("hotkey") == OLD_DEFAULT_HOTKEYS[env_key]:
-                    target["mdm"][env_key]["hotkey"] = DEFAULT_HOTKEYS[env_key]
+    gpm_loaded = False
+    saved_gpm = saved.get("gpm_entries", [])
+    if "gpm_entries" in saved and isinstance(saved_gpm, list):
+        entries = []
+        for item in saved_gpm:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            url = str(item.get("url", "")).strip()
+            hotkey = str(item.get("hotkey", "")).strip()
+            if name or url or hotkey:
+                entries.append({"name": name, "url": url, "hotkey": hotkey})
+        target["gpm_entries"] = entries
+        gpm_loaded = True
+    if not gpm_loaded:
+        saved_mdm = saved.get("mdm", {})
+        if isinstance(saved_mdm, dict):
+            migrated = []
+            for env in ENVIRONMENTS:
+                env_key = env["key"]
+                entry = {"name": env["label"], "url": "", "hotkey": DEFAULT_HOTKEYS[env_key]}
+                if isinstance(saved_mdm.get(env_key), dict):
+                    entry["url"] = str(saved_mdm[env_key].get("url", "") or "")
+                    entry["hotkey"] = str(saved_mdm[env_key].get("hotkey", DEFAULT_HOTKEYS[env_key]) or "")
+                    if entry["hotkey"] == OLD_DEFAULT_HOTKEYS[env_key]:
+                        entry["hotkey"] = DEFAULT_HOTKEYS[env_key]
+                migrated.append(entry)
+            target["gpm_entries"] = migrated
 
     saved_oi = saved.get("oi_entries", [])
-    if isinstance(saved_oi, list):
+    if "oi_entries" in saved and isinstance(saved_oi, list):
         entries = []
         for item in saved_oi:
             if not isinstance(item, dict):
@@ -214,8 +233,7 @@ def merge_config(target: dict, saved: dict) -> None:
             hotkey = str(item.get("hotkey", "")).strip()
             if name or url or hotkey:
                 entries.append({"name": name, "url": url, "hotkey": hotkey})
-        if entries:
-            target["oi_entries"] = entries
+        target["oi_entries"] = entries
 
 
 def load_config() -> dict:
@@ -233,7 +251,7 @@ def load_config() -> dict:
             config["warmup_seconds"] = int(legacy.get("WarmupSeconds", 7) or 7)
             legacy_curl = normalize_mdm_url(legacy.get("CurlLaunchUrl", "") or "")
             if legacy_curl:
-                config["mdm"]["NRD"]["url"] = legacy_curl
+                config["gpm_entries"][0]["url"] = legacy_curl
         except Exception:
             pass
     return config
@@ -332,31 +350,50 @@ def close_process_tree_later(process: subprocess.Popen, seconds: int) -> None:
     timer.start()
 
 
-def open_workspace(config: dict, minimized: bool = True, auto_close_seconds: int | None = None) -> bool:
+def refresh_workspace_background(config: dict, timeout_seconds: int) -> bool:
     url = (config.get("workspace_url") or "").strip()
     if not url:
         return False
 
     browser_path = resolve_browser_path(config.get("browser") or "default")
+    if not browser_path:
+        return False
+
+    args = [
+        "--headless=new",
+        "--disable-gpu",
+        "--dump-dom",
+        "--no-first-run",
+        "--disable-default-browser-check",
+        url,
+    ]
+    try:
+        result = subprocess.run(
+            [browser_path, *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=CREATE_NO_WINDOW,
+            timeout=max(5, int(timeout_seconds or 8)),
+        )
+    except subprocess.TimeoutExpired:
+        return True
+    return result.returncode == 0
+
+
+def open_workspace(config: dict, minimized: bool = True, auto_close_seconds: int | None = None) -> bool:
+    url = (config.get("workspace_url") or "").strip()
+    if not url:
+        return False
+
+    if auto_close_seconds and auto_close_seconds > 0:
+        return refresh_workspace_background(config, auto_close_seconds)
+
+    browser_path = resolve_browser_path(config.get("browser") or "default")
     if browser_path:
-        args = []
-        if auto_close_seconds and auto_close_seconds > 0:
-            profile_dir = CONFIG_DIR / "workspace-refresh-profile"
-            profile_dir.mkdir(parents=True, exist_ok=True)
-            args.extend([
-                f"--user-data-dir={profile_dir}",
-                "--no-first-run",
-                "--disable-default-browser-check",
-                f"--app={url}",
-            ])
-        else:
-            args.append("--new-window")
-            args.append(url)
-        if minimized and not (auto_close_seconds and auto_close_seconds > 0):
+        args = ["--new-window", url]
+        if minimized:
             args.append("--start-minimized")
-        process = subprocess.Popen([browser_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if auto_close_seconds and auto_close_seconds > 0:
-            close_process_tree_later(process, auto_close_seconds)
+        subprocess.Popen([browser_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
         return True
 
     shell_open(url, SW_SHOWMINNOACTIVE if minimized else SW_SHOWNORMAL)
@@ -370,12 +407,43 @@ def launch_mdm_url(url: str) -> None:
     shell_open(normalized, SW_SHOWNORMAL)
 
 
+def resolve_entry_index(entries: list[dict], target: str, aliases: dict[str, str] | None = None) -> int | None:
+    text = (target or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        index = int(text) - 1
+        if 0 <= index < len(entries):
+            return index
+        return None
+
+    lowered = text.lower()
+    if aliases:
+        lowered = aliases.get(lowered, lowered)
+    for index, entry in enumerate(entries):
+        if str(entry.get("name", "")).strip().lower() == lowered:
+            return index
+    return None
+
+
+def launch_gpm_entry(config: dict, index: int) -> None:
+    entries = config.get("gpm_entries", [])
+    if index < 0 or index >= len(entries):
+        raise ValueError("GPM 항목을 찾지 못했습니다.")
+    entry = entries[index]
+    url = normalize_mdm_url(entry.get("url", ""))
+    if not url:
+        name = safe_name(entry.get("name", ""), f"GPM {index + 1}")
+        raise ValueError(f"{name} GPM 주소가 비어 있습니다.")
+    launch_mdm_url(url)
+
+
 def launch_environment(config: dict, env_key: str) -> None:
-    env_config = config.get("mdm", {}).get(env_key, {})
-    mdm_url = normalize_mdm_url(env_config.get("url", ""))
-    if not mdm_url:
-        raise ValueError(f"{env_key} MDM 주소가 비어 있습니다.")
-    launch_mdm_url(mdm_url)
+    target = "MEMORY" if env_key.upper() == "MEM" else env_key
+    index = resolve_entry_index(config.get("gpm_entries", []), target, {"mem": "memory"})
+    if index is None:
+        raise ValueError(f"Unknown GPM entry: {env_key}")
+    launch_gpm_entry(config, index)
 
 
 def normalize_web_url(value: str) -> str:
@@ -441,10 +509,11 @@ def oi_icon_location() -> str:
     return icon_location()
 
 
-def launch_command_for_env(env_key: str) -> tuple[str, str, str]:
+def launch_command_for_gpm(index: int) -> tuple[str, str, str]:
+    launch_arg = str(index + 1)
     if getattr(sys, "frozen", False):
-        return str(Path(sys.executable).resolve()), f"--launch {env_key}", str(app_base_dir())
-    return pythonw_path(), f'"{Path(__file__).resolve()}" --launch {env_key}', str(app_base_dir())
+        return str(Path(sys.executable).resolve()), f"--launch {launch_arg}", str(app_base_dir())
+    return pythonw_path(), f'"{Path(__file__).resolve()}" --launch {launch_arg}', str(app_base_dir())
 
 
 def create_shortcut(shortcut_path: Path, target: str, arguments: str, working_dir: str, icon: str) -> None:
@@ -472,7 +541,7 @@ def oi_shortcut_path(entry: dict, index: int) -> Path:
     shortcuts_dir = CONFIG_DIR / "oi-shortcuts"
     shortcuts_dir.mkdir(parents=True, exist_ok=True)
     name = safe_name(entry.get("name", ""), f"OI {index + 1}")
-    return shortcuts_dir / f"OI - {name}.lnk"
+    return shortcuts_dir / f"{name} OI.lnk"
 
 
 def create_oi_shortcut(entry: dict, index: int, config: dict) -> Path:
@@ -485,11 +554,8 @@ def create_oi_shortcut(entry: dict, index: int, config: dict) -> Path:
     if not browser_path:
         raise ValueError("Edge 또는 Chrome을 찾지 못했습니다.")
 
-    profile_dir = CONFIG_DIR / "oi-profiles" / slug_name(name, f"oi-{index + 1}")
-    profile_dir.mkdir(parents=True, exist_ok=True)
     args = " ".join(
         [
-            f"--user-data-dir={quote_arg(str(profile_dir))}",
             "--no-first-run",
             "--disable-default-browser-check",
             "--start-maximized",
@@ -497,7 +563,7 @@ def create_oi_shortcut(entry: dict, index: int, config: dict) -> Path:
         ]
     )
     shortcut = oi_shortcut_path(entry, index)
-    create_shortcut(shortcut, browser_path, args, str(profile_dir), oi_icon_location())
+    create_shortcut(shortcut, browser_path, args, str(app_base_dir()), oi_icon_location())
     return shortcut
 
 
@@ -511,11 +577,8 @@ def create_oi_desktop_shortcut(entry: dict, index: int, config: dict) -> Path:
     if not browser_path:
         raise ValueError("Edge 또는 Chrome을 찾지 못했습니다.")
 
-    profile_dir = CONFIG_DIR / "oi-profiles" / slug_name(name, f"oi-{index + 1}")
-    profile_dir.mkdir(parents=True, exist_ok=True)
     args = " ".join(
         [
-            f"--user-data-dir={quote_arg(str(profile_dir))}",
             "--no-first-run",
             "--disable-default-browser-check",
             "--start-maximized",
@@ -524,8 +587,8 @@ def create_oi_desktop_shortcut(entry: dict, index: int, config: dict) -> Path:
     )
     desktop = get_desktop_path()
     desktop.mkdir(parents=True, exist_ok=True)
-    shortcut = desktop / f"OI - {name}.lnk"
-    create_shortcut(shortcut, browser_path, args, str(profile_dir), oi_icon_location())
+    shortcut = desktop / f"{name} OI.lnk"
+    create_shortcut(shortcut, browser_path, args, str(app_base_dir()), oi_icon_location())
     return shortcut
 
 
@@ -543,15 +606,24 @@ def launch_oi_entry(config: dict, index: int) -> None:
     shell_open(str(shortcut), SW_SHOWNORMAL)
 
 
-def create_desktop_shortcuts() -> list[Path]:
+def create_gpm_desktop_shortcut(entry: dict, index: int) -> Path:
     desktop = get_desktop_path()
     desktop.mkdir(parents=True, exist_ok=True)
+    name = safe_name(entry.get("name", ""), f"GPM {index + 1}")
+    target, args, working_dir = launch_command_for_gpm(index)
+    shortcut = desktop / f"{name} GPM.lnk"
+    create_shortcut(shortcut, target, args, working_dir, icon_location())
+    return shortcut
+
+
+def create_desktop_shortcuts(config: dict) -> list[Path]:
     created = []
-    for env in ENVIRONMENTS:
-        target, args, working_dir = launch_command_for_env(env["key"])
-        shortcut = desktop / f"{env['shortcut']}.lnk"
-        create_shortcut(shortcut, target, args, working_dir, icon_location())
-        created.append(shortcut)
+    for index, entry in enumerate(config.get("gpm_entries", [])):
+        if not isinstance(entry, dict):
+            continue
+        if not (entry.get("url") or "").strip():
+            continue
+        created.append(create_gpm_desktop_shortcut(entry, index))
     return created
 
 
@@ -590,6 +662,9 @@ def virtual_key_for_token(token: str) -> int | None:
     special = {
         "SPACE": 0x20,
         "TAB": 0x09,
+        "ENTER": 0x0D,
+        "RETURN": 0x0D,
+        "BACKSPACE": 0x08,
         "ESC": 0x1B,
         "ESCAPE": 0x1B,
         "INSERT": 0x2D,
@@ -784,24 +859,25 @@ class HotkeyService:
         registered: dict[int, str] = {}
         errors = []
         try:
-            for index, env in enumerate(ENVIRONMENTS):
-                env_key = env["key"]
-                env_config = self.config.get("mdm", {}).get(env_key, {})
-                if not (env_config.get("url") or "").strip():
+            for index, entry in enumerate(self.config.get("gpm_entries", [])):
+                if not isinstance(entry, dict):
                     continue
-                hotkey = (env_config.get("hotkey") or "").strip()
+                name = safe_name(entry.get("name", ""), f"GPM {index + 1}")
+                if not (entry.get("url") or "").strip():
+                    continue
+                hotkey = (entry.get("hotkey") or "").strip()
                 if not hotkey:
                     continue
                 try:
                     modifiers, vk = hotkey_to_native(hotkey)
                 except ValueError as exc:
-                    errors.append(f"{env['label']}: {exc}")
+                    errors.append(f"GPM {name}: {exc}")
                     continue
                 hotkey_id = HOTKEY_BASE_ID + index
                 if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
-                    registered[hotkey_id] = f"gpm:{env_key}"
+                    registered[hotkey_id] = f"gpm:{index}"
                 else:
-                    errors.append(f"{env['label']}: 단축키 등록 실패 ({hotkey})")
+                    errors.append(f"GPM {name}: 단축키 등록 실패 ({hotkey})")
 
             for index, entry in enumerate(self.config.get("oi_entries", [])):
                 if not isinstance(entry, dict):
@@ -855,10 +931,10 @@ class LauncherApp:
         self.config = load_config()
         self.hotkey_service: HotkeyService | None = None
         self.refresh_after_id: str | None = None
-        self.url_vars: dict[str, tk.StringVar] = {}
-        self.hotkey_vars: dict[str, tk.StringVar] = {}
+        self.gpm_entries: list[dict] = []
         self.oi_entries: list[dict] = []
         self.tray_icon: TrayIcon | None = None
+        self.hotkey_capture_var: tk.StringVar | None = None
 
         self._build_ui()
         self._load_config_to_ui()
@@ -890,7 +966,7 @@ class LauncherApp:
         body.rowconfigure(2, weight=1)
 
         self._build_workspace_frame(body)
-        self._build_mdm_frame(body)
+        self._build_gpm_frame(body)
         self._build_oi_frame(body)
         self._build_button_row(outer)
 
@@ -923,7 +999,7 @@ class LauncherApp:
         ttk.Checkbutton(refresh_row, text="자동", variable=self.refresh_enabled_var).pack(side="left")
         tk.Spinbox(refresh_row, from_=1, to=720, increment=1, width=6, textvariable=self.refresh_minutes_var).pack(side="left", padx=(10, 4))
         ttk.Label(refresh_row, text="분").pack(side="left")
-        ttk.Label(refresh_row, text="닫기").pack(side="left", padx=(10, 4))
+        ttk.Label(refresh_row, text="제한").pack(side="left", padx=(10, 4))
         tk.Spinbox(refresh_row, from_=1, to=120, increment=1, width=5, textvariable=self.workspace_close_seconds_var).pack(side="left")
         ttk.Label(refresh_row, text="초").pack(side="left", padx=(4, 0))
         ttk.Button(refresh_row, text="지금 갱신", command=self.refresh_workspace_from_ui).pack(side="left", padx=(12, 0))
@@ -931,29 +1007,52 @@ class LauncherApp:
 
         ttk.Checkbutton(frame, text="Windows 시작 시 백그라운드 실행", variable=self.startup_var).grid(row=3, column=1, sticky="w", pady=3)
 
-    def _build_mdm_frame(self, parent: ttk.Frame) -> None:
+    def _build_gpm_frame(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="GPM", padding=10)
         frame.grid(row=1, column=0, sticky="nsew")
         frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(1, weight=1)
 
-        ttk.Label(frame, text="구분").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Label(frame, text="MDM 주소").grid(row=0, column=1, sticky="w")
-        ttk.Label(frame, text="단축키").grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.gpm_name_var = tk.StringVar()
+        self.gpm_url_var = tk.StringVar()
+        self.gpm_hotkey_var = tk.StringVar()
 
-        for row, env in enumerate(ENVIRONMENTS, start=1):
-            env_key = env["key"]
-            self.url_vars[env_key] = tk.StringVar()
-            self.hotkey_vars[env_key] = tk.StringVar()
+        editor = ttk.Frame(frame)
+        editor.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 8))
+        editor.columnconfigure(3, weight=1)
+        ttk.Label(editor, text="이름").grid(row=0, column=0, sticky="e", padx=(0, 6))
+        ttk.Entry(editor, textvariable=self.gpm_name_var, width=14).grid(row=0, column=1, sticky="w", padx=(0, 10))
+        ttk.Label(editor, text="주소").grid(row=0, column=2, sticky="e", padx=(0, 6))
+        gpm_url_entry = ttk.Entry(editor, textvariable=self.gpm_url_var)
+        gpm_url_entry.grid(row=0, column=3, sticky="ew", padx=(0, 10))
+        gpm_url_entry.bind("<FocusOut>", lambda _event=None: self._normalize_gpm_editor_url())
+        gpm_url_entry.bind("<<Paste>>", lambda _event=None: self.root.after(80, self._normalize_gpm_editor_url))
+        ttk.Label(editor, text="단축키").grid(row=0, column=4, sticky="e", padx=(0, 6))
+        ttk.Entry(editor, textvariable=self.gpm_hotkey_var, width=18).grid(row=0, column=5, sticky="w")
+        ttk.Button(editor, text="키 입력", command=lambda: self.start_hotkey_capture(self.gpm_hotkey_var)).grid(row=0, column=6, sticky="w", padx=(6, 0))
 
-            ttk.Label(frame, text=env["label"]).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=5)
-            entry = ttk.Entry(frame, textvariable=self.url_vars[env_key])
-            entry.grid(row=row, column=1, sticky="ew", pady=5)
-            self._bind_auto_normalize(entry, self.url_vars[env_key])
-            ttk.Entry(frame, textvariable=self.hotkey_vars[env_key], width=16).grid(row=row, column=2, sticky="w", padx=(8, 0), pady=5)
-            ttk.Button(frame, text="실행", command=lambda key=env_key: self.launch_env_from_ui(key)).grid(row=row, column=3, sticky="w", padx=(8, 0), pady=5)
+        self.gpm_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey", "icon"), show="headings", height=5)
+        self.gpm_tree.heading("name", text="이름")
+        self.gpm_tree.heading("url", text="MDM 주소")
+        self.gpm_tree.heading("hotkey", text="단축키")
+        self.gpm_tree.heading("icon", text="아이콘")
+        self.gpm_tree.column("name", width=120, stretch=False)
+        self.gpm_tree.column("url", width=360, stretch=True)
+        self.gpm_tree.column("hotkey", width=150, stretch=False)
+        self.gpm_tree.column("icon", width=90, stretch=False, anchor="center")
+        self.gpm_tree.grid(row=1, column=0, columnspan=4, sticky="nsew")
+        self.gpm_tree.bind("<<TreeviewSelect>>", lambda _event=None: self._load_selected_gpm_to_editor())
+        self.gpm_tree.bind("<ButtonRelease-1>", self._handle_gpm_tree_click)
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Button(buttons, text="추가 / 수정", command=self.add_or_update_gpm).pack(side="left")
+        ttk.Button(buttons, text="삭제", command=self.delete_selected_gpm).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="실행", command=self.launch_selected_gpm).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="선택 GPM 아이콘 다운로드", command=self.create_selected_gpm_icon).pack(side="left", padx=(6, 0))
 
         hint = ttk.Label(frame, text="GPM 임시 주소나 curl://launch/... 주소를 붙여넣으면 자동으로 실행 주소만 정리합니다.", foreground="#555")
-        hint.grid(row=len(ENVIRONMENTS) + 1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     def _build_oi_frame(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="OI", padding=10)
@@ -977,23 +1076,27 @@ class LauncherApp:
         oi_url_entry.bind("<<Paste>>", lambda _event=None: self.root.after(80, self._normalize_oi_editor_url))
         ttk.Label(editor, text="단축키").grid(row=0, column=4, sticky="e", padx=(0, 6))
         ttk.Entry(editor, textvariable=self.oi_hotkey_var, width=18).grid(row=0, column=5, sticky="w")
+        ttk.Button(editor, text="키 입력", command=lambda: self.start_hotkey_capture(self.oi_hotkey_var)).grid(row=0, column=6, sticky="w", padx=(6, 0))
 
-        self.oi_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey"), show="headings", height=5)
+        self.oi_tree = ttk.Treeview(frame, columns=("name", "url", "hotkey", "icon"), show="headings", height=5)
         self.oi_tree.heading("name", text="이름")
         self.oi_tree.heading("url", text="주소")
         self.oi_tree.heading("hotkey", text="단축키")
+        self.oi_tree.heading("icon", text="아이콘")
         self.oi_tree.column("name", width=120, stretch=False)
-        self.oi_tree.column("url", width=420, stretch=True)
+        self.oi_tree.column("url", width=360, stretch=True)
         self.oi_tree.column("hotkey", width=150, stretch=False)
+        self.oi_tree.column("icon", width=90, stretch=False, anchor="center")
         self.oi_tree.grid(row=1, column=0, columnspan=4, sticky="nsew")
         self.oi_tree.bind("<<TreeviewSelect>>", lambda _event=None: self._load_selected_oi_to_editor())
+        self.oi_tree.bind("<ButtonRelease-1>", self._handle_oi_tree_click)
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         ttk.Button(buttons, text="추가 / 수정", command=self.add_or_update_oi).pack(side="left")
         ttk.Button(buttons, text="삭제", command=self.delete_selected_oi).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="실행", command=self.launch_selected_oi).pack(side="left", padx=(6, 0))
-        ttk.Button(buttons, text="OI 바탕화면 아이콘", command=self.create_selected_oi_icon).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="선택 OI 아이콘 다운로드", command=self.create_selected_oi_icon).pack(side="left", padx=(6, 0))
 
         hint = ttk.Label(frame, text="OI는 주소창 없는 앱 창으로 열립니다. 작업표시줄 분리를 위해 항목별 바로가기를 만들어 실행합니다.", foreground="#555")
         hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
@@ -1003,7 +1106,7 @@ class LauncherApp:
         row.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         row.columnconfigure(0, weight=1)
         ttk.Button(row, text="저장 / 적용", command=self.save_from_ui).grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(row, text="바탕화면 아이콘 생성", command=self.create_icons).grid(row=0, column=2, padx=(0, 6))
+        ttk.Button(row, text="전체 GPM 아이콘 다운로드", command=self.create_icons).grid(row=0, column=2, padx=(0, 6))
         ttk.Button(row, text="숨기기", command=self.hide_to_tray).grid(row=0, column=3, padx=(0, 6))
         ttk.Button(row, text="종료", command=self.quit).grid(row=0, column=4)
 
@@ -1022,6 +1125,180 @@ class LauncherApp:
             var.set(after)
             self.set_status("주소를 curl 실행 주소로 정리했습니다.")
 
+    def start_hotkey_capture(self, target_var: tk.StringVar) -> None:
+        self.stop_hotkey_capture()
+        self.hotkey_capture_var = target_var
+        target_var.set("키를 누르세요")
+        self.set_status("등록할 단축키 조합을 누르세요. Esc는 취소입니다.")
+        self.root.bind_all("<KeyPress>", self._capture_hotkey_event)
+        self.root.focus_force()
+
+    def stop_hotkey_capture(self) -> None:
+        if self.hotkey_capture_var is not None:
+            self.root.unbind_all("<KeyPress>")
+            self.hotkey_capture_var = None
+
+    def _capture_hotkey_event(self, event) -> str:
+        if self.hotkey_capture_var is None:
+            return "break"
+        if event.keysym == "Escape":
+            self.hotkey_capture_var.set("")
+            self.stop_hotkey_capture()
+            self.set_status("단축키 입력을 취소했습니다.")
+            return "break"
+
+        key = self._hotkey_key_name(event.keysym)
+        if not key:
+            return "break"
+
+        modifiers = []
+        if event.state & 0x0004:
+            modifiers.append("Ctrl")
+        if event.state & 0x0008:
+            modifiers.append("Alt")
+        if event.state & 0x0001:
+            modifiers.append("Shift")
+        if event.state & 0x0040 or event.state & 0x0080:
+            modifiers.append("Win")
+
+        if key in {"Ctrl", "Alt", "Shift", "Win"}:
+            return "break"
+        if not modifiers:
+            self.set_status("Ctrl, Alt, Shift, Win 중 하나 이상과 같이 누르세요.")
+            return "break"
+
+        hotkey = "+".join([*modifiers, key])
+        self.hotkey_capture_var.set(hotkey)
+        self.stop_hotkey_capture()
+        self.set_status(f"단축키를 {hotkey}로 입력했습니다.")
+        return "break"
+
+    def _hotkey_key_name(self, keysym: str) -> str:
+        aliases = {
+            "Control_L": "Ctrl",
+            "Control_R": "Ctrl",
+            "Alt_L": "Alt",
+            "Alt_R": "Alt",
+            "Shift_L": "Shift",
+            "Shift_R": "Shift",
+            "Super_L": "Win",
+            "Super_R": "Win",
+            "Win_L": "Win",
+            "Win_R": "Win",
+            "Return": "Enter",
+            "Escape": "Esc",
+            "Prior": "PageUp",
+            "Next": "PageDown",
+            "BackSpace": "Backspace",
+            "Delete": "Delete",
+            "Insert": "Insert",
+            "space": "Space",
+        }
+        if keysym in aliases:
+            return aliases[keysym]
+        if len(keysym) == 1 and keysym.isalnum():
+            return keysym.upper()
+        if re.fullmatch(r"F([1-9]|1[0-9]|2[0-4])", keysym, flags=re.IGNORECASE):
+            return keysym.upper()
+        if keysym in {"Tab", "Home", "End", "Up", "Down", "Left", "Right"}:
+            return keysym
+        return ""
+
+    def _normalize_gpm_editor_url(self) -> None:
+        before = self.gpm_url_var.get()
+        after = normalize_mdm_url(before)
+        if before.strip() and after != before:
+            self.gpm_url_var.set(after)
+            self.set_status("GPM 주소를 curl 실행 주소로 정리했습니다.")
+
+    def _refresh_gpm_tree(self) -> None:
+        for item in self.gpm_tree.get_children():
+            self.gpm_tree.delete(item)
+        for index, entry in enumerate(self.gpm_entries):
+            self.gpm_tree.insert("", "end", iid=str(index), values=(entry.get("name", ""), entry.get("url", ""), entry.get("hotkey", ""), "다운로드"))
+
+    def _handle_gpm_tree_click(self, event) -> None:
+        if self.gpm_tree.identify_column(event.x) != "#4":
+            return
+        row_id = self.gpm_tree.identify_row(event.y)
+        if not row_id:
+            return
+        self.gpm_tree.selection_set(row_id)
+        self.create_selected_gpm_icon()
+
+    def _selected_gpm_index(self) -> int | None:
+        selection = self.gpm_tree.selection()
+        if not selection:
+            return None
+        try:
+            return int(selection[0])
+        except ValueError:
+            return None
+
+    def _load_selected_gpm_to_editor(self) -> None:
+        index = self._selected_gpm_index()
+        if index is None or index >= len(self.gpm_entries):
+            return
+        entry = self.gpm_entries[index]
+        self.gpm_name_var.set(entry.get("name", ""))
+        self.gpm_url_var.set(entry.get("url", ""))
+        self.gpm_hotkey_var.set(entry.get("hotkey", ""))
+
+    def add_or_update_gpm(self) -> None:
+        name = safe_name(self.gpm_name_var.get(), f"GPM {len(self.gpm_entries) + 1}")
+        url = normalize_mdm_url(self.gpm_url_var.get())
+        hotkey = self.gpm_hotkey_var.get().strip()
+        if not url:
+            messagebox.showwarning(APP_NAME, "GPM 주소를 입력하세요.")
+            return
+        entry = {"name": name, "url": url, "hotkey": hotkey}
+        index = self._selected_gpm_index()
+        if index is None or index >= len(self.gpm_entries):
+            self.gpm_entries.append(entry)
+            index = len(self.gpm_entries) - 1
+        else:
+            self.gpm_entries[index] = entry
+        self._refresh_gpm_tree()
+        self.gpm_tree.selection_set(str(index))
+        self.save_from_ui(silent=True)
+        self.set_status(f"GPM {name} 항목을 저장했습니다.")
+
+    def delete_selected_gpm(self) -> None:
+        index = self._selected_gpm_index()
+        if index is None or index >= len(self.gpm_entries):
+            self.set_status("삭제할 GPM 항목을 선택하세요.")
+            return
+        name = self.gpm_entries[index].get("name", f"GPM {index + 1}")
+        del self.gpm_entries[index]
+        self.gpm_name_var.set("")
+        self.gpm_url_var.set("")
+        self.gpm_hotkey_var.set("")
+        self._refresh_gpm_tree()
+        self.save_from_ui(silent=True)
+        self.set_status(f"GPM {name} 항목을 삭제했습니다.")
+
+    def launch_selected_gpm(self) -> None:
+        index = self._selected_gpm_index()
+        if index is None:
+            self.add_or_update_gpm()
+            index = self._selected_gpm_index()
+        if index is not None:
+            self.launch_gpm(index)
+
+    def create_selected_gpm_icon(self) -> None:
+        index = self._selected_gpm_index()
+        if index is None or index >= len(self.gpm_entries):
+            self.set_status("아이콘을 만들 GPM 항목을 선택하세요.")
+            return
+        self.save_from_ui(silent=True)
+        try:
+            entry = self.gpm_entries[index]
+            shortcut = create_gpm_desktop_shortcut(entry, index)
+            messagebox.showinfo(APP_NAME, f"바탕화면 아이콘을 만들었습니다.\n\n{shortcut.name}")
+            self.set_status(f"{shortcut.name} 아이콘을 만들었습니다.")
+        except Exception as exc:
+            messagebox.showwarning(APP_NAME, f"GPM 아이콘 생성 실패:\n{exc}")
+
     def _normalize_oi_editor_url(self) -> None:
         before = self.oi_url_var.get()
         after = normalize_web_url(before)
@@ -1033,7 +1310,16 @@ class LauncherApp:
         for item in self.oi_tree.get_children():
             self.oi_tree.delete(item)
         for index, entry in enumerate(self.oi_entries):
-            self.oi_tree.insert("", "end", iid=str(index), values=(entry.get("name", ""), entry.get("url", ""), entry.get("hotkey", "")))
+            self.oi_tree.insert("", "end", iid=str(index), values=(entry.get("name", ""), entry.get("url", ""), entry.get("hotkey", ""), "다운로드"))
+
+    def _handle_oi_tree_click(self, event) -> None:
+        if self.oi_tree.identify_column(event.x) != "#4":
+            return
+        row_id = self.oi_tree.identify_row(event.y)
+        if not row_id:
+            return
+        self.oi_tree.selection_set(row_id)
+        self.create_selected_oi_icon()
 
     def _selected_oi_index(self) -> int | None:
         selection = self.oi_tree.selection()
@@ -1116,11 +1402,8 @@ class LauncherApp:
         self.workspace_close_seconds_var.set(max(1, int(self.config.get("workspace_close_seconds", 8) or 8)))
         self.startup_var.set(bool(self.config.get("start_with_windows", True)) or startup_enabled_now())
 
-        for env in ENVIRONMENTS:
-            env_key = env["key"]
-            env_config = self.config.get("mdm", {}).get(env_key, {})
-            self.url_vars[env_key].set(env_config.get("url", ""))
-            self.hotkey_vars[env_key].set(env_config.get("hotkey", DEFAULT_HOTKEYS[env_key]))
+        self.gpm_entries = [entry.copy() for entry in self.config.get("gpm_entries", []) if isinstance(entry, dict)]
+        self._refresh_gpm_tree()
         self.oi_entries = [entry.copy() for entry in self.config.get("oi_entries", []) if isinstance(entry, dict)]
         self._refresh_oi_tree()
 
@@ -1133,12 +1416,13 @@ class LauncherApp:
         config["workspace_close_seconds"] = max(1, int(self.workspace_close_seconds_var.get() or 1))
         config["start_with_windows"] = bool(self.startup_var.get())
 
-        for env in ENVIRONMENTS:
-            env_key = env["key"]
-            normalized = normalize_mdm_url(self.url_vars[env_key].get())
-            self.url_vars[env_key].set(normalized)
-            config["mdm"][env_key]["url"] = normalized
-            config["mdm"][env_key]["hotkey"] = self.hotkey_vars[env_key].get().strip()
+        config["gpm_entries"] = []
+        for index, entry in enumerate(self.gpm_entries):
+            name = safe_name(entry.get("name", ""), f"GPM {index + 1}")
+            url = normalize_mdm_url(entry.get("url", ""))
+            hotkey = (entry.get("hotkey") or "").strip()
+            if name or url or hotkey:
+                config["gpm_entries"].append({"name": name, "url": url, "hotkey": hotkey})
         config["oi_entries"] = []
         for index, entry in enumerate(self.oi_entries):
             name = safe_name(entry.get("name", ""), f"OI {index + 1}")
@@ -1190,7 +1474,10 @@ class LauncherApp:
 
     def handle_hotkey_action(self, action: str) -> None:
         if action.startswith("gpm:"):
-            self.launch_env(action.split(":", 1)[1])
+            try:
+                self.launch_gpm(int(action.split(":", 1)[1]))
+            except ValueError:
+                self.set_status("GPM 단축키 실행 대상을 찾지 못했습니다.")
         elif action.startswith("oi:"):
             try:
                 self.launch_oi(int(action.split(":", 1)[1]))
@@ -1207,9 +1494,12 @@ class LauncherApp:
             close_seconds = max(1, int(self.config.get("workspace_close_seconds", 8) or 8))
             if open_workspace(self.config, minimized=True, auto_close_seconds=close_seconds):
                 if show_status:
-                    self.set_status(f"Workspace 갱신 창을 열고 {close_seconds}초 뒤 닫습니다.")
+                    self.set_status(f"Workspace를 백그라운드로 갱신했습니다. 제한 시간 {close_seconds}초.")
             elif show_status:
-                self.set_status("Workspace 주소가 비어 있습니다.")
+                if (self.config.get("workspace_url") or "").strip():
+                    self.set_status("Workspace 백그라운드 갱신에 실패했습니다. Workspace 열기로 로그인 상태를 확인하세요.")
+                else:
+                    self.set_status("Workspace 주소가 비어 있습니다.")
         except Exception as exc:
             if show_status:
                 messagebox.showwarning(APP_NAME, f"Workspace 갱신 실패:\n{exc}")
@@ -1232,10 +1522,21 @@ class LauncherApp:
         self.save_from_ui(silent=True)
         self.launch_env(env_key)
 
+    def launch_gpm(self, index: int) -> None:
+        try:
+            self.config = self.read_from_ui()
+            save_config(self.config)
+            launch_gpm_entry(self.config, index)
+            name = self.config.get("gpm_entries", [])[index].get("name", f"GPM {index + 1}")
+            self.set_status(f"GPM {name} 실행 요청을 보냈습니다.")
+        except Exception as exc:
+            messagebox.showwarning(APP_NAME, f"GPM 실행 실패:\n{exc}")
+
     def launch_env(self, env_key: str) -> None:
         try:
             launch_environment(self.config, env_key)
-            label = next(env["label"] for env in ENVIRONMENTS if env["key"] == env_key)
+            index = resolve_entry_index(self.config.get("gpm_entries", []), env_key, {"mem": "memory"})
+            label = self.config.get("gpm_entries", [])[index].get("name", env_key) if index is not None else env_key
             self.set_status(f"{label} 실행 요청을 보냈습니다.")
         except Exception as exc:
             messagebox.showwarning(APP_NAME, str(exc))
@@ -1253,10 +1554,13 @@ class LauncherApp:
     def create_icons(self) -> None:
         self.save_from_ui(silent=True)
         try:
-            created = create_desktop_shortcuts()
+            created = create_desktop_shortcuts(self.config)
             names = "\n".join(path.name for path in created)
-            messagebox.showinfo(APP_NAME, f"바탕화면 아이콘을 만들었습니다.\n\n{names}")
-            self.set_status("바탕화면 아이콘을 만들었습니다.")
+            if names:
+                messagebox.showinfo(APP_NAME, f"바탕화면 아이콘을 만들었습니다.\n\n{names}")
+                self.set_status("바탕화면 아이콘을 만들었습니다.")
+            else:
+                self.set_status("아이콘을 만들 GPM 주소가 없습니다.")
         except Exception as exc:
             messagebox.showwarning(APP_NAME, f"아이콘 생성 실패:\n{exc}")
 
@@ -1336,25 +1640,15 @@ def run_cli(args: argparse.Namespace) -> int:
             open_workspace(config, minimized=True, auto_close_seconds=close_seconds)
             return 0
         if args.launch:
-            env_key = args.launch.upper()
-            if env_key == "MEM":
-                env_key = "MEMORY"
-            allowed = {env["key"] for env in ENVIRONMENTS}
-            if env_key not in allowed:
-                raise ValueError(f"Unknown environment: {args.launch}")
-            launch_environment(config, env_key)
+            index = resolve_entry_index(config.get("gpm_entries", []), args.launch, {"mem": "memory"})
+            if index is None:
+                raise ValueError(f"Unknown GPM entry: {args.launch}")
+            launch_gpm_entry(config, index)
             return 0
         if args.launch_oi:
             target = args.launch_oi.strip()
             entries = config.get("oi_entries", [])
-            selected_index = None
-            if target.isdigit():
-                selected_index = max(0, int(target) - 1)
-            else:
-                for index, entry in enumerate(entries):
-                    if str(entry.get("name", "")).strip().lower() == target.lower():
-                        selected_index = index
-                        break
+            selected_index = resolve_entry_index(entries, target)
             if selected_index is None:
                 raise ValueError(f"Unknown OI entry: {args.launch_oi}")
             launch_oi_entry(config, selected_index)
@@ -1367,7 +1661,7 @@ def run_cli(args: argparse.Namespace) -> int:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=APP_NAME)
-    parser.add_argument("--launch", choices=["NRD", "MEM", "MEMORY", "NRDK", "nrd", "mem", "memory", "nrdk"], help="Launch a configured GPM environment.")
+    parser.add_argument("--launch", help="Launch a configured GPM entry by name or index.")
     parser.add_argument("--launch-oi", help="Launch a configured OI entry by name or index.")
     parser.add_argument("--refresh-only", action="store_true", help="Refresh workspace session and exit.")
     parser.add_argument("--background", action="store_true", help="Start hidden in the background.")
