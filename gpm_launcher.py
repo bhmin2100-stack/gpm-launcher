@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 from ctypes import wintypes
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ APP_NAME = "GPM Launcher"
 APP_REG_NAME = "GPMLauncher"
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "GPM Launcher"
 CONFIG_PATH = CONFIG_DIR / "config.json"
+WINDOW_CACHE_PATH = CONFIG_DIR / "window-cache.json"
 LEGACY_CONFIG_PATH = Path(__file__).resolve().parent / "gpm-launcher.config.json"
 HOTKEY_BASE_ID = 0x4700
 OI_HOTKEY_BASE_ID = 0x4800
@@ -38,6 +40,7 @@ MOD_NOREPEAT = 0x4000
 CREATE_NO_WINDOW = 0x08000000
 SW_SHOWNORMAL = 1
 SW_SHOWMINNOACTIVE = 7
+SW_RESTORE = 9
 GWL_WNDPROC = -4
 NIM_ADD = 0x00000000
 NIM_MODIFY = 0x00000001
@@ -79,6 +82,7 @@ DEFAULT_GPM_ENTRIES = [
     {"name": env["label"], "url": "", "hotkey": DEFAULT_HOTKEYS[env["key"]]}
     for env in ENVIRONMENTS
 ]
+WINDOW_HANDLE_CACHE: dict[str, int] = {}
 
 
 class POINT(ctypes.Structure):
@@ -111,6 +115,7 @@ class NOTIFYICONDATAW(ctypes.Structure):
 LONG_PTR = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
 LRESULT = LONG_PTR
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 
 user32 = ctypes.windll.user32
@@ -132,6 +137,22 @@ user32.GetMessageW.argtypes = [ctypes.POINTER(MSG), wintypes.HWND, wintypes.UINT
 user32.GetMessageW.restype = wintypes.BOOL
 user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostThreadMessageW.restype = wintypes.BOOL
+user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+user32.EnumWindows.restype = wintypes.BOOL
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
+user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.IsWindowVisible.restype = wintypes.BOOL
+user32.IsIconic.argtypes = [wintypes.HWND]
+user32.IsIconic.restype = wintypes.BOOL
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.ShowWindow.restype = wintypes.BOOL
+user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+user32.GetWindowTextLengthW.restype = ctypes.c_int
+user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetWindowTextW.restype = ctypes.c_int
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 GetWindowLongPtrW.restype = LONG_PTR
 SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
@@ -407,6 +428,247 @@ def launch_mdm_url(url: str) -> None:
     shell_open(normalized, SW_SHOWNORMAL)
 
 
+def normalized_entry_url(kind: str, entry: dict) -> str:
+    if kind == "gpm":
+        return normalize_mdm_url(entry.get("url", ""))
+    return normalize_web_url(entry.get("url", ""))
+
+
+def window_cache_key(kind: str, entry: dict, index: int) -> str:
+    name = safe_name(entry.get("name", ""), f"{kind.upper()} {index + 1}")
+    identity = f"{kind}|{name}|{normalized_entry_url(kind, entry)}"
+    digest = hashlib.sha1(identity.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"{kind}:{slug_name(name, kind)}:{digest}"
+
+
+def load_window_handle_cache() -> None:
+    if not WINDOW_CACHE_PATH.exists():
+        return
+    try:
+        data = json.loads(WINDOW_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    for key, value in data.items():
+        try:
+            WINDOW_HANDLE_CACHE[str(key)] = int(value)
+        except (TypeError, ValueError):
+            continue
+
+
+def save_window_handle_cache() -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        WINDOW_CACHE_PATH.write_text(json.dumps(WINDOW_HANDLE_CACHE, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def cache_entry_window(kind: str, entry: dict, index: int, hwnd: int) -> None:
+    load_window_handle_cache()
+    WINDOW_HANDLE_CACHE[window_cache_key(kind, entry, index)] = int(hwnd)
+    save_window_handle_cache()
+
+
+def get_window_text(hwnd: int) -> str:
+    length = user32.GetWindowTextLengthW(wintypes.HWND(hwnd))
+    if length <= 0:
+        return ""
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(wintypes.HWND(hwnd), buffer, length + 1)
+    return buffer.value.strip()
+
+
+def enumerate_visible_windows() -> list[dict]:
+    windows: list[dict] = []
+
+    @WNDENUMPROC
+    def callback(hwnd, _lparam):
+        hwnd_int = int(hwnd)
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        title = get_window_text(hwnd_int)
+        if not title or title == APP_NAME:
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        windows.append({"hwnd": hwnd_int, "title": title, "pid": int(pid.value)})
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return windows
+
+
+def visible_window_handles() -> set[int]:
+    return {window["hwnd"] for window in enumerate_visible_windows()}
+
+
+def focus_window(hwnd: int) -> bool:
+    handle = wintypes.HWND(hwnd)
+    if not user32.IsWindow(handle):
+        return False
+    if user32.IsIconic(handle):
+        user32.ShowWindow(handle, SW_RESTORE)
+    else:
+        user32.ShowWindow(handle, SW_SHOWNORMAL)
+    user32.SetForegroundWindow(handle)
+    return True
+
+
+def focus_cached_entry_window(kind: str, entry: dict, index: int) -> bool:
+    load_window_handle_cache()
+    key = window_cache_key(kind, entry, index)
+    hwnd = WINDOW_HANDLE_CACHE.get(key)
+    if not hwnd:
+        return False
+    if focus_window(hwnd):
+        return True
+    WINDOW_HANDLE_CACHE.pop(key, None)
+    save_window_handle_cache()
+    return False
+
+
+def title_matches_entry(title: str, entry: dict, kind: str, index: int) -> bool:
+    lowered = title.lower()
+    if lowered == APP_NAME.lower() or "gpm launcher" in lowered:
+        return False
+    name = safe_name(entry.get("name", ""), f"{kind.upper()} {index + 1}").lower()
+    candidates = [name]
+    if kind == "oi":
+        candidates.append(f"{name} oi")
+    elif kind == "gpm":
+        candidates.append(f"{name} gpm")
+    return any(candidate and len(candidate) >= 2 and candidate in lowered for candidate in candidates)
+
+
+def get_process_command_lines(pids: set[int]) -> dict[int, str]:
+    if not pids:
+        return {}
+    ids = ",".join(str(pid) for pid in sorted(pids) if pid > 0)
+    if not ids:
+        return {}
+    script = (
+        f"$ids = @({ids}); "
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $ids -contains $_.ProcessId } | "
+        "Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            creationflags=CREATE_NO_WINDOW,
+            timeout=3,
+        )
+    except Exception:
+        return {}
+    text = (result.stdout or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(data, dict):
+        data = [data]
+    command_lines: dict[int, str] = {}
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                pid = int(item.get("ProcessId"))
+            except (TypeError, ValueError):
+                continue
+            command_lines[pid] = str(item.get("CommandLine") or "")
+    return command_lines
+
+
+def command_line_matches_oi(command_line: str, entry: dict) -> bool:
+    url = normalize_web_url(entry.get("url", ""))
+    if not url:
+        return False
+    command = unquote(command_line or "").lower()
+    if "--app" not in command:
+        return False
+    lowered_url = unquote(url).lower()
+    if lowered_url and lowered_url in command:
+        return True
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    return bool(host and host in command)
+
+
+def focus_existing_entry_window(kind: str, entry: dict, index: int, config: dict | None = None) -> bool:
+    if focus_cached_entry_window(kind, entry, index):
+        return True
+
+    windows = enumerate_visible_windows()
+    if kind == "oi":
+        command_lines = get_process_command_lines({window["pid"] for window in windows})
+        for window in windows:
+            if command_line_matches_oi(command_lines.get(window["pid"], ""), entry):
+                cache_entry_window(kind, entry, index, window["hwnd"])
+                return focus_window(window["hwnd"])
+
+    for window in windows:
+        if title_matches_entry(window["title"], entry, kind, index):
+            cache_entry_window(kind, entry, index, window["hwnd"])
+            return focus_window(window["hwnd"])
+
+    return False
+
+
+def pick_new_entry_window(kind: str, entry: dict, before_handles: set[int]) -> dict | None:
+    windows = [window for window in enumerate_visible_windows() if window["hwnd"] not in before_handles]
+    if not windows:
+        return None
+
+    if kind == "oi":
+        command_lines = get_process_command_lines({window["pid"] for window in windows})
+        for window in windows:
+            if command_line_matches_oi(command_lines.get(window["pid"], ""), entry):
+                return window
+
+    for window in windows:
+        if title_matches_entry(window["title"], entry, kind, 0):
+            return window
+
+    system_fragments = ("windows 입력 환경", "명령 도구 모음", "software update", "소프트웨어 업데이트")
+    for window in reversed(windows):
+        title = window["title"].lower()
+        if any(fragment in title for fragment in system_fragments):
+            continue
+        return window
+    return windows[-1]
+
+
+def remember_new_entry_window(kind: str, entry: dict, index: int, before_handles: set[int], timeout_seconds: float = 10.0) -> None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        window = pick_new_entry_window(kind, entry, before_handles)
+        if window:
+            cache_entry_window(kind, entry, index, window["hwnd"])
+            return
+        time.sleep(0.4)
+
+
+def remember_new_entry_window_async(kind: str, entry: dict, index: int, before_handles: set[int]) -> None:
+    thread = threading.Thread(
+        target=remember_new_entry_window,
+        args=(kind, entry.copy(), index, set(before_handles)),
+        name=f"GPMRememberWindow-{kind}-{index}",
+        daemon=False,
+    )
+    thread.start()
+
+
 def resolve_entry_index(entries: list[dict], target: str, aliases: dict[str, str] | None = None) -> int | None:
     text = (target or "").strip()
     if not text:
@@ -426,7 +688,7 @@ def resolve_entry_index(entries: list[dict], target: str, aliases: dict[str, str
     return None
 
 
-def launch_gpm_entry(config: dict, index: int) -> None:
+def launch_gpm_entry(config: dict, index: int) -> str:
     entries = config.get("gpm_entries", [])
     if index < 0 or index >= len(entries):
         raise ValueError("GPM 항목을 찾지 못했습니다.")
@@ -435,15 +697,20 @@ def launch_gpm_entry(config: dict, index: int) -> None:
     if not url:
         name = safe_name(entry.get("name", ""), f"GPM {index + 1}")
         raise ValueError(f"{name} GPM 주소가 비어 있습니다.")
+    if focus_existing_entry_window("gpm", entry, index, config):
+        return "focused"
+    before_handles = visible_window_handles()
     launch_mdm_url(url)
+    remember_new_entry_window_async("gpm", entry, index, before_handles)
+    return "launched"
 
 
-def launch_environment(config: dict, env_key: str) -> None:
+def launch_environment(config: dict, env_key: str) -> str:
     target = "MEMORY" if env_key.upper() == "MEM" else env_key
     index = resolve_entry_index(config.get("gpm_entries", []), target, {"mem": "memory"})
     if index is None:
         raise ValueError(f"Unknown GPM entry: {env_key}")
-    launch_gpm_entry(config, index)
+    return launch_gpm_entry(config, index)
 
 
 def normalize_web_url(value: str) -> str:
@@ -598,12 +865,18 @@ def quote_arg(value: str) -> str:
     return value
 
 
-def launch_oi_entry(config: dict, index: int) -> None:
+def launch_oi_entry(config: dict, index: int) -> str:
     entries = config.get("oi_entries", [])
     if index < 0 or index >= len(entries):
         raise ValueError("OI 항목을 찾지 못했습니다.")
-    shortcut = create_oi_shortcut(entries[index], index, config)
+    entry = entries[index]
+    if focus_existing_entry_window("oi", entry, index, config):
+        return "focused"
+    before_handles = visible_window_handles()
+    shortcut = create_oi_shortcut(entry, index, config)
     shell_open(str(shortcut), SW_SHOWNORMAL)
+    remember_new_entry_window_async("oi", entry, index, before_handles)
+    return "launched"
 
 
 def create_gpm_desktop_shortcut(entry: dict, index: int) -> Path:
@@ -1526,18 +1799,24 @@ class LauncherApp:
         try:
             self.config = self.read_from_ui()
             save_config(self.config)
-            launch_gpm_entry(self.config, index)
+            result = launch_gpm_entry(self.config, index)
             name = self.config.get("gpm_entries", [])[index].get("name", f"GPM {index + 1}")
-            self.set_status(f"GPM {name} 실행 요청을 보냈습니다.")
+            if result == "focused":
+                self.set_status(f"GPM {name} 창을 앞으로 가져왔습니다.")
+            else:
+                self.set_status(f"GPM {name} 실행 요청을 보냈습니다.")
         except Exception as exc:
             messagebox.showwarning(APP_NAME, f"GPM 실행 실패:\n{exc}")
 
     def launch_env(self, env_key: str) -> None:
         try:
-            launch_environment(self.config, env_key)
+            result = launch_environment(self.config, env_key)
             index = resolve_entry_index(self.config.get("gpm_entries", []), env_key, {"mem": "memory"})
             label = self.config.get("gpm_entries", [])[index].get("name", env_key) if index is not None else env_key
-            self.set_status(f"{label} 실행 요청을 보냈습니다.")
+            if result == "focused":
+                self.set_status(f"{label} 창을 앞으로 가져왔습니다.")
+            else:
+                self.set_status(f"{label} 실행 요청을 보냈습니다.")
         except Exception as exc:
             messagebox.showwarning(APP_NAME, str(exc))
 
@@ -1545,9 +1824,12 @@ class LauncherApp:
         try:
             self.config = self.read_from_ui()
             save_config(self.config)
-            launch_oi_entry(self.config, index)
+            result = launch_oi_entry(self.config, index)
             name = self.config.get("oi_entries", [])[index].get("name", f"OI {index + 1}")
-            self.set_status(f"OI {name} 실행 요청을 보냈습니다.")
+            if result == "focused":
+                self.set_status(f"OI {name} 창을 앞으로 가져왔습니다.")
+            else:
+                self.set_status(f"OI {name} 실행 요청을 보냈습니다.")
         except Exception as exc:
             messagebox.showwarning(APP_NAME, f"OI 실행 실패:\n{exc}")
 

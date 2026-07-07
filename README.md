@@ -11,6 +11,7 @@ Windows launcher for the company GPM Curl applications.
 - Keeps the workspace session alive before the 4-hour timeout, with a refresh interval adjustable in 1-minute steps.
 - Refreshes the workspace in a background headless browser attempt using the normal Edge/Chrome profile instead of a separate app profile.
 - Launches GPM directly from hotkeys and desktop shortcuts without opening the workspace first.
+- Remembers windows opened from registered GPM/OI entries and brings the existing window to the front instead of opening another one.
 - Adds configurable OI entries with user-defined names, URLs, and hotkeys.
 - Opens OI pages in browser app mode without the normal address bar or toolbar, using the normal Edge/Chrome profile for SSO.
 - Can hide to the Windows tray and restore from the tray icon.
