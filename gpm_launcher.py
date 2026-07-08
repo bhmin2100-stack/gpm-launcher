@@ -25,6 +25,7 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 WINDOW_CACHE_PATH = CONFIG_DIR / "window-cache.json"
 LOG_PATH = CONFIG_DIR / "gpm-launcher.log"
 LEGACY_CONFIG_PATH = Path(__file__).resolve().parent / "gpm-launcher.config.json"
+ICON_TEMPLATE_VERSION = "name-label-v2"
 HOTKEY_BASE_ID = 0x4700
 OI_HOTKEY_BASE_ID = 0x4800
 AGREEMENT_HOTKEY_BASE_ID = 0x4900
@@ -962,7 +963,7 @@ def oi_icon_location() -> str:
 def generated_icon_location(kind: str, entry: dict) -> str:
     fallback = oi_icon_location() if kind in {"oi", "agreement"} else icon_location()
     name = safe_name(entry.get("name", ""), kind_display_name(kind))
-    digest = hashlib.sha1(f"{kind}|{name}|{normalized_entry_url(kind, entry)}".encode("utf-8", errors="ignore")).hexdigest()[:12]
+    digest = hashlib.sha1(f"{ICON_TEMPLATE_VERSION}|{kind}|{name}|{normalized_entry_url(kind, entry)}".encode("utf-8", errors="ignore")).hexdigest()[:12]
     icon_dir = CONFIG_DIR / "icons"
     icon_dir.mkdir(parents=True, exist_ok=True)
     icon_path = icon_dir / f"{kind}-{slug_name(name, kind)}-{digest}.ico"
@@ -1849,7 +1850,8 @@ class LauncherApp:
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        ttk.Button(buttons, text="추가 / 수정", command=self.add_or_update_gpm).pack(side="left")
+        ttk.Button(buttons, text="추가", command=self.add_gpm).pack(side="left")
+        ttk.Button(buttons, text="수정", command=self.update_selected_gpm).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="삭제", command=self.delete_selected_gpm).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="실행", command=self.launch_selected_gpm).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="선택 GPM 아이콘 다운로드", command=self.create_selected_gpm_icon).pack(side="left", padx=(6, 0))
@@ -1901,7 +1903,8 @@ class LauncherApp:
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        ttk.Button(buttons, text="추가 / 수정", command=self.add_or_update_oi).pack(side="left")
+        ttk.Button(buttons, text="추가", command=self.add_oi).pack(side="left")
+        ttk.Button(buttons, text="수정", command=self.update_selected_oi).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="삭제", command=self.delete_selected_oi).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="실행", command=self.launch_selected_oi).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="선택 OI 아이콘 다운로드", command=self.create_selected_oi_icon).pack(side="left", padx=(6, 0))
@@ -1953,7 +1956,8 @@ class LauncherApp:
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        ttk.Button(buttons, text="추가 / 수정", command=self.add_or_update_agreement).pack(side="left")
+        ttk.Button(buttons, text="추가", command=self.add_agreement).pack(side="left")
+        ttk.Button(buttons, text="수정", command=self.update_selected_agreement).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="삭제", command=self.delete_selected_agreement).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="실행", command=self.launch_selected_agreement).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="선택 합의/결재 아이콘 다운로드", command=self.create_selected_agreement_icon).pack(side="left", padx=(6, 0))
@@ -2193,7 +2197,13 @@ class LauncherApp:
         self.gpm_url_var.set(entry.get("url", ""))
         self.gpm_hotkey_var.set(entry.get("hotkey", ""))
 
-    def add_or_update_gpm(self) -> None:
+    def add_gpm(self) -> None:
+        self.add_or_update_gpm(force_add=True)
+
+    def update_selected_gpm(self) -> None:
+        self.add_or_update_gpm(require_selection=True)
+
+    def add_or_update_gpm(self, force_add: bool = False, require_selection: bool = False) -> None:
         self.stop_hotkey_capture(restore_original=True)
         name = safe_name(self.gpm_name_var.get(), f"GPM {len(self.gpm_entries) + 1}")
         url = normalize_mdm_url(self.gpm_url_var.get())
@@ -2202,16 +2212,21 @@ class LauncherApp:
             messagebox.showwarning(APP_NAME, "GPM 주소를 입력하세요.")
             return
         entry = {"name": name, "url": url, "hotkey": hotkey}
-        index = self._selected_gpm_index()
+        index = None if force_add else self._selected_gpm_index()
+        if require_selection and (index is None or index >= len(self.gpm_entries)):
+            self.set_status("수정할 GPM 항목을 선택하세요.")
+            return
         if index is None or index >= len(self.gpm_entries):
             self.gpm_entries.append(entry)
             index = len(self.gpm_entries) - 1
+            action = "추가"
         else:
             self.gpm_entries[index] = entry
+            action = "수정"
         self._refresh_gpm_tree()
         self.gpm_tree.selection_set(str(index))
         self.save_from_ui(silent=True)
-        self.set_status(f"GPM {name} 항목을 저장했습니다.")
+        self.set_status(f"GPM {name} 항목을 {action}했습니다.")
 
     def delete_selected_gpm(self) -> None:
         index = self._selected_gpm_index()
@@ -2289,7 +2304,13 @@ class LauncherApp:
         self.oi_url_var.set(entry.get("url", ""))
         self.oi_hotkey_var.set(entry.get("hotkey", ""))
 
-    def add_or_update_oi(self) -> None:
+    def add_oi(self) -> None:
+        self.add_or_update_oi(force_add=True)
+
+    def update_selected_oi(self) -> None:
+        self.add_or_update_oi(require_selection=True)
+
+    def add_or_update_oi(self, force_add: bool = False, require_selection: bool = False) -> None:
         self.stop_hotkey_capture(restore_original=True)
         name = safe_name(self.oi_name_var.get(), f"OI {len(self.oi_entries) + 1}")
         url = normalize_web_url(self.oi_url_var.get())
@@ -2298,16 +2319,21 @@ class LauncherApp:
             messagebox.showwarning(APP_NAME, "OI 주소를 입력하세요.")
             return
         entry = {"name": name, "url": url, "hotkey": hotkey}
-        index = self._selected_oi_index()
+        index = None if force_add else self._selected_oi_index()
+        if require_selection and (index is None or index >= len(self.oi_entries)):
+            self.set_status("수정할 OI 항목을 선택하세요.")
+            return
         if index is None or index >= len(self.oi_entries):
             self.oi_entries.append(entry)
             index = len(self.oi_entries) - 1
+            action = "추가"
         else:
             self.oi_entries[index] = entry
+            action = "수정"
         self._refresh_oi_tree()
         self.oi_tree.selection_set(str(index))
         self.save_from_ui(silent=True)
-        self.set_status(f"OI {name} 항목을 저장했습니다.")
+        self.set_status(f"OI {name} 항목을 {action}했습니다.")
 
     def delete_selected_oi(self) -> None:
         index = self._selected_oi_index()
@@ -2385,7 +2411,13 @@ class LauncherApp:
         self.agreement_url_var.set(entry.get("url", ""))
         self.agreement_hotkey_var.set(entry.get("hotkey", ""))
 
-    def add_or_update_agreement(self) -> None:
+    def add_agreement(self) -> None:
+        self.add_or_update_agreement(force_add=True)
+
+    def update_selected_agreement(self) -> None:
+        self.add_or_update_agreement(require_selection=True)
+
+    def add_or_update_agreement(self, force_add: bool = False, require_selection: bool = False) -> None:
         self.stop_hotkey_capture(restore_original=True)
         name = safe_name(self.agreement_name_var.get(), f"합의-결재 {len(self.agreement_entries) + 1}")
         url = normalize_web_url(self.agreement_url_var.get())
@@ -2394,16 +2426,21 @@ class LauncherApp:
             messagebox.showwarning(APP_NAME, "합의/결재 주소를 입력하세요.")
             return
         entry = {"name": name, "url": url, "hotkey": hotkey}
-        index = self._selected_agreement_index()
+        index = None if force_add else self._selected_agreement_index()
+        if require_selection and (index is None or index >= len(self.agreement_entries)):
+            self.set_status("수정할 합의/결재 항목을 선택하세요.")
+            return
         if index is None or index >= len(self.agreement_entries):
             self.agreement_entries.append(entry)
             index = len(self.agreement_entries) - 1
+            action = "추가"
         else:
             self.agreement_entries[index] = entry
+            action = "수정"
         self._refresh_agreement_tree()
         self.agreement_tree.selection_set(str(index))
         self.save_from_ui(silent=True)
-        self.set_status(f"합의/결재 {name} 항목을 저장했습니다.")
+        self.set_status(f"합의/결재 {name} 항목을 {action}했습니다.")
 
     def delete_selected_agreement(self) -> None:
         index = self._selected_agreement_index()
