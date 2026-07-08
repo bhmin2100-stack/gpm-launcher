@@ -1587,7 +1587,7 @@ class HotkeyService:
             if message in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 if modifier_bit:
                     self.hook_pressed_modifiers |= modifier_bit
-                    suppress = bool(modifier_bit & self.hook_modifier_mask & (MOD_ALT | MOD_WIN))
+                    suppress = bool(modifier_bit == MOD_WIN and self.hook_modifier_mask & MOD_WIN)
                 else:
                     key_vk = normalize_hotkey_vk(vk)
                     action = self.hook_hotkeys.get((self.hook_pressed_modifiers, key_vk))
@@ -1596,13 +1596,15 @@ class HotkeyService:
                         if key_vk not in self.hook_triggered_keys:
                             self.hook_triggered_keys.add(key_vk)
                             self.on_hotkey(action)
+                    elif self.hook_pressed_modifiers & MOD_WIN and self.hook_modifier_mask & MOD_WIN:
+                        suppress = True
             else:
                 if modifier_bit:
-                    suppress = bool(modifier_bit & self.hook_modifier_mask & (MOD_ALT | MOD_WIN))
+                    suppress = bool(modifier_bit == MOD_WIN and self.hook_modifier_mask & MOD_WIN)
                     self.hook_pressed_modifiers &= ~modifier_bit
                 else:
                     key_vk = normalize_hotkey_vk(vk)
-                    suppress = key_vk in self.hook_triggered_keys
+                    suppress = key_vk in self.hook_triggered_keys or bool(self.hook_pressed_modifiers & MOD_WIN and self.hook_modifier_mask & MOD_WIN)
                     self.hook_triggered_keys.discard(key_vk)
 
             if suppress:
