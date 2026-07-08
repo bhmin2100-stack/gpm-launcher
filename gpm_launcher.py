@@ -119,10 +119,7 @@ DEFAULT_OI_ENTRIES = [
     {"name": "NRD", "url": "", "hotkey": ""},
 ]
 
-DEFAULT_AGREEMENT_ENTRIES = [
-    {"name": "NRD", "url": "", "hotkey": ""},
-    {"name": "NRDK", "url": "", "hotkey": ""},
-]
+DEFAULT_AGREEMENT_ENTRIES: list[dict] = []
 HOTKEY_CAPTURE_PROMPT = "키를 누르세요"
 
 DEFAULT_GPM_ENTRIES = [
@@ -341,6 +338,8 @@ def merge_config(target: dict, saved: dict) -> None:
             name = str(item.get("name", "")).strip()
             url = str(item.get("url", "")).strip()
             hotkey = str(item.get("hotkey", "")).strip()
+            if not url and not hotkey and name.upper() in {"NRD", "NRDK"}:
+                continue
             if name or url or hotkey:
                 entries.append({"name": name, "url": url, "hotkey": hotkey})
         target["agreement_entries"] = entries
@@ -524,7 +523,11 @@ def normalized_entry_url(kind: str, entry: dict) -> str:
 
 
 def kind_display_name(kind: str) -> str:
-    return {"gpm": "GPM", "oi": "OI", "agreement": "합의"}.get(kind, kind.upper())
+    return {"gpm": "GPM", "oi": "OI", "agreement": "합의/결재"}.get(kind, kind.upper())
+
+
+def kind_file_label(kind: str) -> str:
+    return kind_display_name(kind).replace("/", "-")
 
 
 def window_cache_key(kind: str, entry: dict, index: int) -> str:
@@ -718,7 +721,7 @@ def title_has_oi_marker(title: str) -> bool:
 
 
 def title_has_agreement_marker(title: str) -> bool:
-    return "합의" in title or bool(re.search(r"\bagreement\b", title, flags=re.IGNORECASE))
+    return "합의" in title or "결재" in title or bool(re.search(r"\bagreement\b", title, flags=re.IGNORECASE))
 
 
 def get_process_command_lines(pids: set[int]) -> dict[int, str]:
@@ -969,7 +972,7 @@ def generated_icon_location(kind: str, entry: dict) -> str:
     specs = {
         "gpm": ("GPM", (27, 94, 170, 255), (40, 163, 106, 255)),
         "oi": ("OI", (38, 76, 89, 255), (42, 126, 161, 255)),
-        "agreement": ("합의", (92, 64, 140, 255), (48, 132, 130, 255)),
+        "agreement": ("결재", (92, 64, 140, 255), (48, 132, 130, 255)),
     }
     main_text, top_color, bottom_color = specs.get(kind, specs["gpm"])
     label = icon_label(name)
@@ -1092,7 +1095,7 @@ def web_shortcut_path(kind: str, entry: dict, index: int) -> Path:
     shortcuts_dir = CONFIG_DIR / f"{kind}-shortcuts"
     shortcuts_dir.mkdir(parents=True, exist_ok=True)
     name = safe_name(entry.get("name", ""), f"{kind_display_name(kind)} {index + 1}")
-    return shortcuts_dir / f"{name} {kind_display_name(kind)}.lnk"
+    return shortcuts_dir / f"{name} {kind_file_label(kind)}.lnk"
 
 
 def create_web_app_shortcut(kind: str, entry: dict, index: int, config: dict, desktop: bool = False) -> Path:
@@ -1117,7 +1120,7 @@ def create_web_app_shortcut(kind: str, entry: dict, index: int, config: dict, de
     if desktop:
         target_dir = get_desktop_path()
         target_dir.mkdir(parents=True, exist_ok=True)
-        shortcut = target_dir / f"{name} {label}.lnk"
+        shortcut = target_dir / f"{name} {kind_file_label(kind)}.lnk"
     else:
         shortcut = web_shortcut_path(kind, entry, index)
     create_shortcut(
@@ -1169,7 +1172,7 @@ def launch_oi_entry(config: dict, index: int) -> str:
 def launch_agreement_entry(config: dict, index: int) -> str:
     entries = config.get("agreement_entries", [])
     if index < 0 or index >= len(entries):
-        raise ValueError("합의 항목을 찾지 못했습니다.")
+        raise ValueError("합의/결재 항목을 찾지 못했습니다.")
     entry = entries[index]
     if focus_existing_entry_window("agreement", entry, index, config):
         return "focused"
@@ -1664,7 +1667,7 @@ class HotkeyService:
             for index, entry in enumerate(self.config.get("agreement_entries", [])):
                 if not isinstance(entry, dict):
                     continue
-                name = safe_name(entry.get("name", ""), f"합의 {index + 1}")
+                name = safe_name(entry.get("name", ""), f"합의-결재 {index + 1}")
                 if not (entry.get("url") or "").strip():
                     continue
                 hotkey = (entry.get("hotkey") or "").strip()
@@ -1673,7 +1676,7 @@ class HotkeyService:
                 try:
                     modifiers, vk = hotkey_to_native(hotkey)
                 except ValueError as exc:
-                    errors.append(f"합의 {name}: {exc}")
+                    errors.append(f"합의/결재 {name}: {exc}")
                     continue
                 hotkey_id = AGREEMENT_HOTKEY_BASE_ID + index
                 if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
@@ -1681,7 +1684,7 @@ class HotkeyService:
                 elif self._add_hook_hotkey(modifiers, vk, f"agreement:{index}"):
                     pass
                 else:
-                    errors.append(f"합의 {name}: 단축키 등록 실패 ({hotkey})")
+                    errors.append(f"합의/결재 {name}: 단축키 등록 실패 ({hotkey})")
 
             if self.hook_hotkeys and not self._install_keyboard_hook():
                 self.hook_hotkeys = {}
@@ -1913,7 +1916,7 @@ class LauncherApp:
         hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     def _build_agreement_frame(self, parent: ttk.Frame, row: int, column: int) -> None:
-        frame = ttk.LabelFrame(parent, text="합의", padding=10)
+        frame = ttk.LabelFrame(parent, text="합의/결재", padding=10)
         frame.grid(row=row, column=column, sticky="nsew", padx=(6, 0), pady=(6, 0))
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(1, weight=1)
@@ -1953,11 +1956,11 @@ class LauncherApp:
         ttk.Button(buttons, text="추가 / 수정", command=self.add_or_update_agreement).pack(side="left")
         ttk.Button(buttons, text="삭제", command=self.delete_selected_agreement).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="실행", command=self.launch_selected_agreement).pack(side="left", padx=(6, 0))
-        ttk.Button(buttons, text="선택 합의 아이콘 다운로드", command=self.create_selected_agreement_icon).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="선택 합의/결재 아이콘 다운로드", command=self.create_selected_agreement_icon).pack(side="left", padx=(6, 0))
 
         hint = ttk.Label(
             frame,
-            text="브라우저에서 합의 페이지의 주소표시줄 주소를 복사해 등록하세요. 합의 링크는 OI처럼 주소창 없는 앱 창으로 열립니다.",
+            text="브라우저에서 합의/결재 페이지의 주소표시줄 주소를 복사해 등록하세요. 합의/결재 링크는 OI처럼 주소창 없는 앱 창으로 열립니다.",
             foreground="#555",
             wraplength=520,
             justify="left",
@@ -2347,7 +2350,7 @@ class LauncherApp:
         after = normalize_web_url(before)
         if before.strip() and after != before:
             self.agreement_url_var.set(after)
-            self.set_status("합의 주소를 브라우저 주소로 정리했습니다.")
+            self.set_status("합의/결재 주소를 브라우저 주소로 정리했습니다.")
 
     def _refresh_agreement_tree(self) -> None:
         for item in self.agreement_tree.get_children():
@@ -2384,11 +2387,11 @@ class LauncherApp:
 
     def add_or_update_agreement(self) -> None:
         self.stop_hotkey_capture(restore_original=True)
-        name = safe_name(self.agreement_name_var.get(), f"합의 {len(self.agreement_entries) + 1}")
+        name = safe_name(self.agreement_name_var.get(), f"합의-결재 {len(self.agreement_entries) + 1}")
         url = normalize_web_url(self.agreement_url_var.get())
         hotkey = self.agreement_hotkey_var.get().strip()
         if not url:
-            messagebox.showwarning(APP_NAME, "합의 주소를 입력하세요.")
+            messagebox.showwarning(APP_NAME, "합의/결재 주소를 입력하세요.")
             return
         entry = {"name": name, "url": url, "hotkey": hotkey}
         index = self._selected_agreement_index()
@@ -2400,21 +2403,21 @@ class LauncherApp:
         self._refresh_agreement_tree()
         self.agreement_tree.selection_set(str(index))
         self.save_from_ui(silent=True)
-        self.set_status(f"합의 {name} 항목을 저장했습니다.")
+        self.set_status(f"합의/결재 {name} 항목을 저장했습니다.")
 
     def delete_selected_agreement(self) -> None:
         index = self._selected_agreement_index()
         if index is None or index >= len(self.agreement_entries):
-            self.set_status("삭제할 합의 항목을 선택하세요.")
+            self.set_status("삭제할 합의/결재 항목을 선택하세요.")
             return
-        name = self.agreement_entries[index].get("name", f"합의 {index + 1}")
+        name = self.agreement_entries[index].get("name", f"합의-결재 {index + 1}")
         del self.agreement_entries[index]
         self.agreement_name_var.set("")
         self.agreement_url_var.set("")
         self.agreement_hotkey_var.set("")
         self._refresh_agreement_tree()
         self.save_from_ui(silent=True)
-        self.set_status(f"합의 {name} 항목을 삭제했습니다.")
+        self.set_status(f"합의/결재 {name} 항목을 삭제했습니다.")
 
     def launch_selected_agreement(self) -> None:
         index = self._selected_agreement_index()
@@ -2427,7 +2430,7 @@ class LauncherApp:
     def create_selected_agreement_icon(self) -> None:
         index = self._selected_agreement_index()
         if index is None or index >= len(self.agreement_entries):
-            self.set_status("아이콘을 만들 합의 항목을 선택하세요.")
+            self.set_status("아이콘을 만들 합의/결재 항목을 선택하세요.")
             return
         self.save_from_ui(silent=True)
         try:
@@ -2436,7 +2439,7 @@ class LauncherApp:
             messagebox.showinfo(APP_NAME, f"바탕화면 아이콘을 만들었습니다.\n\n{shortcut.name}")
             self.set_status(f"{shortcut.name} 아이콘을 만들었습니다.")
         except Exception as exc:
-            messagebox.showwarning(APP_NAME, f"합의 아이콘 생성 실패:\n{exc}")
+            messagebox.showwarning(APP_NAME, f"합의/결재 아이콘 생성 실패:\n{exc}")
 
     def _load_config_to_ui(self) -> None:
         self.workspace_var.set(self.config.get("workspace_url", ""))
@@ -2478,7 +2481,7 @@ class LauncherApp:
                 config["oi_entries"].append({"name": name, "url": url, "hotkey": hotkey})
         config["agreement_entries"] = []
         for index, entry in enumerate(self.agreement_entries):
-            name = safe_name(entry.get("name", ""), f"합의 {index + 1}")
+            name = safe_name(entry.get("name", ""), f"합의-결재 {index + 1}")
             url = normalize_web_url(entry.get("url", ""))
             hotkey = (entry.get("hotkey") or "").strip()
             if name or url or hotkey:
@@ -2562,7 +2565,7 @@ class LauncherApp:
             try:
                 self.launch_agreement(int(action.split(":", 1)[1]))
             except ValueError:
-                self.set_status("합의 단축키 실행 대상을 찾지 못했습니다.")
+                self.set_status("합의/결재 단축키 실행 대상을 찾지 못했습니다.")
 
     def handle_hotkey_errors(self, errors: list[str], show_errors: bool) -> None:
         self.set_status("일부 단축키 미등록: 이미 쓰는 조합이면 다른 키로 바꿔주세요.")
@@ -2645,13 +2648,13 @@ class LauncherApp:
             self.config = self.read_from_ui()
             save_config(self.config)
             result = launch_agreement_entry(self.config, index)
-            name = self.config.get("agreement_entries", [])[index].get("name", f"합의 {index + 1}")
+            name = self.config.get("agreement_entries", [])[index].get("name", f"합의-결재 {index + 1}")
             if result == "focused":
-                self.set_status(f"합의 {name} 창을 앞으로 가져왔습니다.")
+                self.set_status(f"합의/결재 {name} 창을 앞으로 가져왔습니다.")
             else:
-                self.set_status(f"합의 {name} 실행 요청을 보냈습니다.")
+                self.set_status(f"합의/결재 {name} 실행 요청을 보냈습니다.")
         except Exception as exc:
-            messagebox.showwarning(APP_NAME, f"합의 실행 실패:\n{exc}")
+            messagebox.showwarning(APP_NAME, f"합의/결재 실행 실패:\n{exc}")
 
     def create_icons(self) -> None:
         self.save_from_ui(silent=True)
