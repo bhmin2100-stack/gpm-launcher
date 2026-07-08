@@ -1285,19 +1285,6 @@ class TrayIcon:
                 self._show_menu()
             return 0
 
-        if message == WM_COMMAND:
-            if int(lparam):
-                if self.old_wndproc:
-                    return user32.CallWindowProcW(self.old_wndproc, hwnd, message, wparam, lparam)
-                return 0
-            command_id = int(wparam) & 0xFFFF
-            if command_id == ID_TRAY_SHOW:
-                self.root.after(0, self.on_show)
-                return 0
-            if command_id == ID_TRAY_EXIT:
-                self.root.after(0, self.on_exit)
-                return 0
-
         if self.old_wndproc:
             return user32.CallWindowProcW(self.old_wndproc, hwnd, message, wparam, lparam)
         return 0
@@ -2351,8 +2338,6 @@ class LauncherApp:
             messagebox.showwarning(APP_NAME, "트레이 아이콘을 만들 수 없습니다.")
 
     def show_from_tray(self) -> None:
-        if self.tray_icon:
-            self.tray_icon.hide()
         self.root.deiconify()
         self.root.state("normal")
         self.root.lift()
