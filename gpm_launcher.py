@@ -206,7 +206,7 @@ def default_config() -> dict:
         "workspace_close_seconds": 8,
         "refresh_minutes": 210,
         "refresh_enabled": True,
-        "start_with_windows": True,
+        "start_with_windows": False,
         "gpm_entries": [entry.copy() for entry in DEFAULT_GPM_ENTRIES],
         "oi_entries": [entry.copy() for entry in DEFAULT_OI_ENTRIES],
         "agreement_entries": [entry.copy() for entry in DEFAULT_AGREEMENT_ENTRIES],
@@ -1501,7 +1501,8 @@ class LauncherApp:
         self.refresh_enabled_var = tk.BooleanVar(value=True)
         self.refresh_minutes_var = tk.IntVar(value=210)
         self.workspace_close_seconds_var = tk.IntVar(value=8)
-        self.startup_var = tk.BooleanVar(value=True)
+        self.startup_var = tk.BooleanVar(value=startup_enabled_now())
+        self.startup_status_var = tk.StringVar()
 
         ttk.Label(frame, text="주소").grid(row=0, column=0, sticky="e", padx=(0, 8), pady=3)
         ttk.Entry(frame, textvariable=self.workspace_var).grid(row=0, column=1, sticky="ew", pady=3)
@@ -1522,7 +1523,11 @@ class LauncherApp:
         ttk.Button(refresh_row, text="지금 갱신", command=self.refresh_workspace_from_ui).pack(side="left", padx=(12, 0))
         ttk.Button(refresh_row, text="Workspace 열기", command=self.open_workspace_visible).pack(side="left", padx=(6, 0))
 
-        ttk.Checkbutton(frame, text="Windows 시작 시 백그라운드 실행", variable=self.startup_var).grid(row=3, column=1, sticky="w", pady=3)
+        startup_row = ttk.Frame(frame)
+        startup_row.grid(row=3, column=1, sticky="w", pady=3)
+        ttk.Label(startup_row, textvariable=self.startup_status_var).pack(side="left")
+        ttk.Button(startup_row, text="시작 프로그램 등록", command=self.register_startup_from_ui).pack(side="left", padx=(10, 0))
+        ttk.Button(startup_row, text="시작 프로그램 해제", command=self.unregister_startup_from_ui).pack(side="left", padx=(6, 0))
 
     def _build_gpm_frame(self, parent: ttk.Frame, row: int, column: int) -> None:
         frame = ttk.LabelFrame(parent, text="GPM", padding=10)
@@ -1567,7 +1572,13 @@ class LauncherApp:
         ttk.Button(buttons, text="실행", command=self.launch_selected_gpm).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="선택 GPM 아이콘 다운로드", command=self.create_selected_gpm_icon).pack(side="left", padx=(6, 0))
 
-        hint = ttk.Label(frame, text="GPM 임시 주소나 curl://launch/... 주소를 붙여넣으면 자동으로 실행 주소만 정리합니다.", foreground="#555")
+        hint = ttk.Label(
+            frame,
+            text="브라우저에서 GPM 실행 탭의 주소표시줄 주소를 복사해 등록하세요. curl://launch/... 주소는 자동 정리됩니다.",
+            foreground="#555",
+            wraplength=520,
+            justify="left",
+        )
         hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     def _build_oi_frame(self, parent: ttk.Frame, row: int, column: int) -> None:
@@ -1615,7 +1626,7 @@ class LauncherApp:
 
         hint = ttk.Label(
             frame,
-            text="OI 이름에는 실제 페이지 제목에서 구분되는 문자열(P2L3, P1L7 등)을 넣으면 이미 열린 창을 더 잘 찾습니다.",
+            text="브라우저에서 OI 페이지의 주소표시줄 주소를 복사해 등록하세요. 이름에는 페이지 구분 문자열(P2L3, P1L7 등)을 넣으면 이미 열린 창을 더 잘 찾습니다.",
             foreground="#555",
             wraplength=520,
             justify="left",
@@ -1665,7 +1676,13 @@ class LauncherApp:
         ttk.Button(buttons, text="실행", command=self.launch_selected_agreement).pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="선택 합의 아이콘 다운로드", command=self.create_selected_agreement_icon).pack(side="left", padx=(6, 0))
 
-        hint = ttk.Label(frame, text="합의 링크는 OI처럼 주소창 없는 앱 창으로 열립니다.", foreground="#555")
+        hint = ttk.Label(
+            frame,
+            text="브라우저에서 합의 페이지의 주소표시줄 주소를 복사해 등록하세요. 합의 링크는 OI처럼 주소창 없는 앱 창으로 열립니다.",
+            foreground="#555",
+            wraplength=520,
+            justify="left",
+        )
         hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     def _build_button_row(self, parent: ttk.Frame) -> None:
@@ -1774,14 +1791,6 @@ class LauncherApp:
 
     def _event_modifiers(self, event) -> list[str]:
         modifiers = set(self.hotkey_capture_modifiers)
-        if event.state & 0x0004:
-            modifiers.add("Ctrl")
-        if event.state & 0x0008 or event.state & 0x20000:
-            modifiers.add("Alt")
-        if event.state & 0x0001:
-            modifiers.add("Shift")
-        if event.state & 0x0040 or event.state & 0x0080:
-            modifiers.add("Win")
         return [name for name in ("Ctrl", "Alt", "Shift", "Win") if name in modifiers]
 
     def _hotkey_key_name(self, keysym: str) -> str:
@@ -2109,7 +2118,7 @@ class LauncherApp:
         self.refresh_enabled_var.set(bool(self.config.get("refresh_enabled", True)))
         self.refresh_minutes_var.set(max(1, int(self.config.get("refresh_minutes", 210) or 210)))
         self.workspace_close_seconds_var.set(max(1, int(self.config.get("workspace_close_seconds", 8) or 8)))
-        self.startup_var.set(bool(self.config.get("start_with_windows", True)) or startup_enabled_now())
+        self.update_startup_status()
 
         self.gpm_entries = [entry.copy() for entry in self.config.get("gpm_entries", []) if isinstance(entry, dict)]
         self._refresh_gpm_tree()
@@ -2125,7 +2134,7 @@ class LauncherApp:
         config["refresh_enabled"] = bool(self.refresh_enabled_var.get())
         config["refresh_minutes"] = max(1, int(self.refresh_minutes_var.get() or 1))
         config["workspace_close_seconds"] = max(1, int(self.workspace_close_seconds_var.get() or 1))
-        config["start_with_windows"] = bool(self.startup_var.get())
+        config["start_with_windows"] = startup_enabled_now()
 
         config["gpm_entries"] = []
         for index, entry in enumerate(self.gpm_entries):
@@ -2154,13 +2163,34 @@ class LauncherApp:
         self.stop_hotkey_capture(restore_original=True)
         self.config = self.read_from_ui()
         save_config(self.config)
-        try:
-            set_startup(bool(self.config.get("start_with_windows", True)))
-        except Exception as exc:
-            messagebox.showwarning(APP_NAME, f"Windows 시작 등록 실패:\n{exc}")
         self.apply_runtime_settings(show_errors=False)
         if not silent:
             self.set_status("저장했습니다.")
+
+    def update_startup_status(self) -> None:
+        enabled = startup_enabled_now()
+        self.startup_var.set(enabled)
+        self.startup_status_var.set("시작 프로그램: 등록됨" if enabled else "시작 프로그램: 미등록")
+
+    def register_startup_from_ui(self) -> None:
+        try:
+            set_startup(True)
+            self.update_startup_status()
+            self.config = self.read_from_ui()
+            save_config(self.config)
+            self.set_status("Windows 시작 프로그램에 등록했습니다.")
+        except Exception as exc:
+            messagebox.showwarning(APP_NAME, f"Windows 시작 등록 실패:\n{exc}")
+
+    def unregister_startup_from_ui(self) -> None:
+        try:
+            set_startup(False)
+            self.update_startup_status()
+            self.config = self.read_from_ui()
+            save_config(self.config)
+            self.set_status("Windows 시작 프로그램에서 해제했습니다.")
+        except Exception as exc:
+            messagebox.showwarning(APP_NAME, f"Windows 시작 해제 실패:\n{exc}")
 
     def apply_runtime_settings(self, show_errors: bool) -> None:
         self.configure_refresh_timer()
