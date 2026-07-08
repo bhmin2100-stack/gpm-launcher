@@ -1547,7 +1547,7 @@ class HotkeyService:
     def _add_hook_hotkey(self, modifiers: int, vk: int, action: str) -> bool:
         modifier_mask = modifiers & ~MOD_NOREPEAT
         key = (modifier_mask, normalize_hotkey_vk(vk))
-        if not modifier_mask or not (modifier_mask & (MOD_ALT | MOD_WIN)) or key in self.hook_hotkeys:
+        if not modifier_mask:
             return False
         self.hook_hotkeys[key] = action
         self.hook_modifier_mask |= modifier_mask
@@ -1614,7 +1614,6 @@ class HotkeyService:
 
     def _run(self) -> None:
         self.thread_id = int(kernel32.GetCurrentThreadId())
-        registered: dict[int, str] = {}
         errors = []
         self.hook_hotkeys = {}
         self.hook_modifier_mask = 0
@@ -1635,12 +1634,7 @@ class HotkeyService:
                 except ValueError as exc:
                     errors.append(f"GPM {name}: {exc}")
                     continue
-                hotkey_id = HOTKEY_BASE_ID + index
-                if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
-                    registered[hotkey_id] = f"gpm:{index}"
-                elif self._add_hook_hotkey(modifiers, vk, f"gpm:{index}"):
-                    pass
-                else:
+                if not self._add_hook_hotkey(modifiers, vk, f"gpm:{index}"):
                     errors.append(f"GPM {name}: 단축키 등록 실패 ({hotkey})")
 
             for index, entry in enumerate(self.config.get("oi_entries", [])):
@@ -1657,12 +1651,7 @@ class HotkeyService:
                 except ValueError as exc:
                     errors.append(f"OI {name}: {exc}")
                     continue
-                hotkey_id = OI_HOTKEY_BASE_ID + index
-                if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
-                    registered[hotkey_id] = f"oi:{index}"
-                elif self._add_hook_hotkey(modifiers, vk, f"oi:{index}"):
-                    pass
-                else:
+                if not self._add_hook_hotkey(modifiers, vk, f"oi:{index}"):
                     errors.append(f"OI {name}: 단축키 등록 실패 ({hotkey})")
 
             for index, entry in enumerate(self.config.get("agreement_entries", [])):
@@ -1679,17 +1668,12 @@ class HotkeyService:
                 except ValueError as exc:
                     errors.append(f"합의/결재 {name}: {exc}")
                     continue
-                hotkey_id = AGREEMENT_HOTKEY_BASE_ID + index
-                if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
-                    registered[hotkey_id] = f"agreement:{index}"
-                elif self._add_hook_hotkey(modifiers, vk, f"agreement:{index}"):
-                    pass
-                else:
+                if not self._add_hook_hotkey(modifiers, vk, f"agreement:{index}"):
                     errors.append(f"합의/결재 {name}: 단축키 등록 실패 ({hotkey})")
 
             if self.hook_hotkeys and not self._install_keyboard_hook():
                 self.hook_hotkeys = {}
-                errors.append("Windows 예약 단축키 보조 훅 설치 실패")
+                errors.append("전역 단축키 훅 설치 실패")
 
             if errors:
                 self.on_errors(errors)
@@ -1697,14 +1681,9 @@ class HotkeyService:
 
             msg = MSG()
             while not self.stopping.is_set() and user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-                if msg.message == WM_HOTKEY:
-                    action = registered.get(int(msg.wParam))
-                    if action:
-                        self.on_hotkey(action)
+                pass
         finally:
             self._uninstall_keyboard_hook()
-            for hotkey_id in registered:
-                user32.UnregisterHotKey(None, hotkey_id)
             self.ready.set()
 
 
