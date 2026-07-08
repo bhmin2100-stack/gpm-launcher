@@ -33,11 +33,46 @@ WM_APP = 0x8000
 WM_TRAYICON = WM_APP + 1
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
+WH_KEYBOARD_LL = 13
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
+VK_BACK = 0x08
+VK_TAB = 0x09
+VK_RETURN = 0x0D
+VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12
+VK_ESCAPE = 0x1B
+VK_SPACE = 0x20
+VK_PRIOR = 0x21
+VK_NEXT = 0x22
+VK_END = 0x23
+VK_HOME = 0x24
+VK_LEFT = 0x25
+VK_UP = 0x26
+VK_RIGHT = 0x27
+VK_DOWN = 0x28
+VK_INSERT = 0x2D
+VK_DELETE = 0x2E
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
+VK_NUMPAD0 = 0x60
+VK_NUMPAD9 = 0x69
+VK_F1 = 0x70
+VK_F24 = 0x87
+VK_LSHIFT = 0xA0
+VK_RSHIFT = 0xA1
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
+VK_LMENU = 0xA4
+VK_RMENU = 0xA5
 CREATE_NO_WINDOW = 0x08000000
 SW_SHOWNORMAL = 1
 SW_SHOWMINNOACTIVE = 7
@@ -58,6 +93,7 @@ TPM_RIGHTBUTTON = 0x00000002
 TPM_RETURNCMD = 0x00000100
 ID_TRAY_SHOW = 1001
 ID_TRAY_EXIT = 1002
+MODIFIER_KEY_NAMES = {"Ctrl", "Alt", "Shift", "Win"}
 
 ENVIRONMENTS = [
     {"key": "NRD", "label": "NRD", "shortcut": "NRD GPM"},
@@ -116,9 +152,21 @@ class NOTIFYICONDATAW(ctypes.Structure):
 
 
 LONG_PTR = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
+ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 LRESULT = LONG_PTR
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+LOWLEVELKEYBOARDPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
 
 
 user32 = ctypes.windll.user32
@@ -179,7 +227,15 @@ user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 user32.SetForegroundWindow.restype = wintypes.BOOL
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
+user32.SetWindowsHookExW.argtypes = [ctypes.c_int, LOWLEVELKEYBOARDPROC, wintypes.HINSTANCE, wintypes.DWORD]
+user32.SetWindowsHookExW.restype = wintypes.HANDLE
+user32.UnhookWindowsHookEx.argtypes = [wintypes.HANDLE]
+user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+user32.CallNextHookEx.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+user32.CallNextHookEx.restype = LRESULT
 kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
 shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
 shell32.ShellExecuteW.restype = ctypes.c_void_p
 shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
@@ -1167,6 +1223,66 @@ def virtual_key_for_token(token: str) -> int | None:
     return special.get(token)
 
 
+def modifier_bit_for_vk(vk_code: int) -> int:
+    if vk_code in (VK_CONTROL, VK_LCONTROL, VK_RCONTROL):
+        return MOD_CONTROL
+    if vk_code in (VK_MENU, VK_LMENU, VK_RMENU):
+        return MOD_ALT
+    if vk_code in (VK_SHIFT, VK_LSHIFT, VK_RSHIFT):
+        return MOD_SHIFT
+    if vk_code in (VK_LWIN, VK_RWIN):
+        return MOD_WIN
+    return 0
+
+
+def modifier_name_for_vk(vk_code: int) -> str:
+    bit = modifier_bit_for_vk(vk_code)
+    if bit == MOD_CONTROL:
+        return "Ctrl"
+    if bit == MOD_ALT:
+        return "Alt"
+    if bit == MOD_SHIFT:
+        return "Shift"
+    if bit == MOD_WIN:
+        return "Win"
+    return ""
+
+
+def normalize_hotkey_vk(vk_code: int) -> int:
+    if VK_NUMPAD0 <= vk_code <= VK_NUMPAD9:
+        return ord("0") + (vk_code - VK_NUMPAD0)
+    return vk_code
+
+
+def hotkey_key_name_from_vk(vk_code: int) -> str:
+    modifier = modifier_name_for_vk(vk_code)
+    if modifier:
+        return modifier
+    vk_code = normalize_hotkey_vk(vk_code)
+    if ord("A") <= vk_code <= ord("Z") or ord("0") <= vk_code <= ord("9"):
+        return chr(vk_code)
+    if VK_F1 <= vk_code <= VK_F24:
+        return f"F{vk_code - VK_F1 + 1}"
+    special = {
+        VK_SPACE: "Space",
+        VK_TAB: "Tab",
+        VK_RETURN: "Enter",
+        VK_BACK: "Backspace",
+        VK_ESCAPE: "Esc",
+        VK_INSERT: "Insert",
+        VK_DELETE: "Delete",
+        VK_HOME: "Home",
+        VK_END: "End",
+        VK_PRIOR: "PageUp",
+        VK_NEXT: "PageDown",
+        VK_UP: "Up",
+        VK_DOWN: "Down",
+        VK_LEFT: "Left",
+        VK_RIGHT: "Right",
+    }
+    return special.get(vk_code, "")
+
+
 def hotkey_to_native(sequence: str) -> tuple[int, int]:
     text = (sequence or "").strip().replace(" ", "")
     if not text:
@@ -1320,6 +1436,12 @@ class HotkeyService:
         self.thread_id: int | None = None
         self.ready = threading.Event()
         self.stopping = threading.Event()
+        self.keyboard_hook: int | None = None
+        self.keyboard_hook_proc: LOWLEVELKEYBOARDPROC | None = None
+        self.hook_hotkeys: dict[tuple[int, int], str] = {}
+        self.hook_modifier_mask = 0
+        self.hook_pressed_modifiers = 0
+        self.hook_triggered_keys: set[int] = set()
 
     def start(self) -> None:
         self.thread = threading.Thread(target=self._run, name="GPMHotkeys", daemon=True)
@@ -1333,10 +1455,82 @@ class HotkeyService:
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2)
 
+    def _add_hook_hotkey(self, modifiers: int, vk: int, action: str) -> bool:
+        modifier_mask = modifiers & ~MOD_NOREPEAT
+        key = (modifier_mask, normalize_hotkey_vk(vk))
+        if not modifier_mask or not (modifier_mask & (MOD_ALT | MOD_WIN)) or key in self.hook_hotkeys:
+            return False
+        self.hook_hotkeys[key] = action
+        self.hook_modifier_mask |= modifier_mask
+        return True
+
+    def _install_keyboard_hook(self) -> bool:
+        if not self.hook_hotkeys:
+            return True
+        self.keyboard_hook_proc = LOWLEVELKEYBOARDPROC(self._keyboard_hook_callback)
+        module_handle = kernel32.GetModuleHandleW(None)
+        self.keyboard_hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self.keyboard_hook_proc, module_handle, 0)
+        return bool(self.keyboard_hook)
+
+    def _uninstall_keyboard_hook(self) -> None:
+        if self.keyboard_hook:
+            user32.UnhookWindowsHookEx(wintypes.HANDLE(self.keyboard_hook))
+        self.keyboard_hook = None
+        self.keyboard_hook_proc = None
+
+    def _call_next_keyboard_hook(self, n_code: int, w_param: int, l_param: int) -> int:
+        return int(user32.CallNextHookEx(wintypes.HANDLE(self.keyboard_hook or 0), n_code, w_param, l_param))
+
+    def _keyboard_hook_callback(self, n_code: int, w_param: int, l_param: int) -> int:
+        if n_code < 0 or not self.hook_hotkeys:
+            return self._call_next_keyboard_hook(n_code, w_param, l_param)
+
+        message = int(w_param)
+        if message not in (WM_KEYDOWN, WM_SYSKEYDOWN, WM_KEYUP, WM_SYSKEYUP):
+            return self._call_next_keyboard_hook(n_code, w_param, l_param)
+
+        try:
+            keyboard = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            vk = int(keyboard.vkCode)
+            modifier_bit = modifier_bit_for_vk(vk)
+            suppress = False
+
+            if message in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                if modifier_bit:
+                    self.hook_pressed_modifiers |= modifier_bit
+                    suppress = bool(modifier_bit & self.hook_modifier_mask & (MOD_ALT | MOD_WIN))
+                else:
+                    key_vk = normalize_hotkey_vk(vk)
+                    action = self.hook_hotkeys.get((self.hook_pressed_modifiers, key_vk))
+                    if action:
+                        suppress = True
+                        if key_vk not in self.hook_triggered_keys:
+                            self.hook_triggered_keys.add(key_vk)
+                            self.on_hotkey(action)
+            else:
+                if modifier_bit:
+                    suppress = bool(modifier_bit & self.hook_modifier_mask & (MOD_ALT | MOD_WIN))
+                    self.hook_pressed_modifiers &= ~modifier_bit
+                else:
+                    key_vk = normalize_hotkey_vk(vk)
+                    suppress = key_vk in self.hook_triggered_keys
+                    self.hook_triggered_keys.discard(key_vk)
+
+            if suppress:
+                return 1
+        except Exception:
+            return 1
+
+        return self._call_next_keyboard_hook(n_code, w_param, l_param)
+
     def _run(self) -> None:
         self.thread_id = int(kernel32.GetCurrentThreadId())
         registered: dict[int, str] = {}
         errors = []
+        self.hook_hotkeys = {}
+        self.hook_modifier_mask = 0
+        self.hook_pressed_modifiers = 0
+        self.hook_triggered_keys = set()
         try:
             for index, entry in enumerate(self.config.get("gpm_entries", [])):
                 if not isinstance(entry, dict):
@@ -1355,6 +1549,8 @@ class HotkeyService:
                 hotkey_id = HOTKEY_BASE_ID + index
                 if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
                     registered[hotkey_id] = f"gpm:{index}"
+                elif self._add_hook_hotkey(modifiers, vk, f"gpm:{index}"):
+                    pass
                 else:
                     errors.append(f"GPM {name}: 단축키 등록 실패 ({hotkey})")
 
@@ -1375,6 +1571,8 @@ class HotkeyService:
                 hotkey_id = OI_HOTKEY_BASE_ID + index
                 if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
                     registered[hotkey_id] = f"oi:{index}"
+                elif self._add_hook_hotkey(modifiers, vk, f"oi:{index}"):
+                    pass
                 else:
                     errors.append(f"OI {name}: 단축키 등록 실패 ({hotkey})")
 
@@ -1395,8 +1593,14 @@ class HotkeyService:
                 hotkey_id = AGREEMENT_HOTKEY_BASE_ID + index
                 if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
                     registered[hotkey_id] = f"agreement:{index}"
+                elif self._add_hook_hotkey(modifiers, vk, f"agreement:{index}"):
+                    pass
                 else:
                     errors.append(f"합의 {name}: 단축키 등록 실패 ({hotkey})")
+
+            if self.hook_hotkeys and not self._install_keyboard_hook():
+                self.hook_hotkeys = {}
+                errors.append("Windows 예약 단축키 보조 훅 설치 실패")
 
             if errors:
                 self.on_errors(errors)
@@ -1409,6 +1613,7 @@ class HotkeyService:
                     if action:
                         self.on_hotkey(action)
         finally:
+            self._uninstall_keyboard_hook()
             for hotkey_id in registered:
                 user32.UnregisterHotKey(None, hotkey_id)
             self.ready.set()
@@ -1437,6 +1642,8 @@ class LauncherApp:
         self.hotkey_capture_var: tk.StringVar | None = None
         self.hotkey_capture_modifiers: set[str] = set()
         self.hotkey_capture_original_value = ""
+        self.hotkey_capture_hook: int | None = None
+        self.hotkey_capture_hook_proc: LOWLEVELKEYBOARDPROC | None = None
 
         self._build_ui()
         self._load_config_to_ui()
@@ -1721,8 +1928,10 @@ class LauncherApp:
         self.set_status("등록할 단축키 조합을 누르세요. Esc는 취소, Backspace/Delete는 삭제입니다.")
         self.root.bind_all("<KeyPress>", self._capture_hotkey_event)
         self.root.bind_all("<KeyRelease>", self._release_hotkey_modifier)
+        self._install_hotkey_capture_hook()
 
     def stop_hotkey_capture(self, restore_original: bool = False) -> None:
+        self._uninstall_hotkey_capture_hook()
         if self.hotkey_capture_var is not None:
             target_var = self.hotkey_capture_var
             original_value = self.hotkey_capture_original_value
@@ -1738,40 +1947,85 @@ class LauncherApp:
         if self.hotkey_capture_var is target_var:
             self.stop_hotkey_capture(restore_original=True)
 
-    def _capture_hotkey_event(self, event) -> str:
+    def _install_hotkey_capture_hook(self) -> bool:
+        if self.hotkey_capture_hook:
+            return True
+        self.hotkey_capture_hook_proc = LOWLEVELKEYBOARDPROC(self._hotkey_capture_keyboard_callback)
+        module_handle = kernel32.GetModuleHandleW(None)
+        self.hotkey_capture_hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self.hotkey_capture_hook_proc, module_handle, 0)
+        return bool(self.hotkey_capture_hook)
+
+    def _uninstall_hotkey_capture_hook(self) -> None:
+        if self.hotkey_capture_hook:
+            user32.UnhookWindowsHookEx(wintypes.HANDLE(self.hotkey_capture_hook))
+        self.hotkey_capture_hook = None
+        self.hotkey_capture_hook_proc = None
+
+    def _call_next_hotkey_capture_hook(self, n_code: int, w_param: int, l_param: int) -> int:
+        return int(user32.CallNextHookEx(wintypes.HANDLE(self.hotkey_capture_hook or 0), n_code, w_param, l_param))
+
+    def _hotkey_capture_keyboard_callback(self, n_code: int, w_param: int, l_param: int) -> int:
+        if n_code < 0 or self.hotkey_capture_var is None:
+            return self._call_next_hotkey_capture_hook(n_code, w_param, l_param)
+
+        message = int(w_param)
+        if message in (WM_KEYDOWN, WM_SYSKEYDOWN, WM_KEYUP, WM_SYSKEYUP):
+            try:
+                keyboard = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                key = hotkey_key_name_from_vk(int(keyboard.vkCode))
+                if key:
+                    self._handle_hotkey_capture_key(key, message in (WM_KEYDOWN, WM_SYSKEYDOWN))
+            except Exception:
+                pass
+            return 1
+
+        return self._call_next_hotkey_capture_hook(n_code, w_param, l_param)
+
+    def _handle_hotkey_capture_key(self, key: str, pressed: bool) -> None:
         if self.hotkey_capture_var is None:
-            return "break"
-        if event.keysym == "Escape":
+            return
+
+        if not pressed:
+            if key in MODIFIER_KEY_NAMES:
+                self.hotkey_capture_modifiers.discard(key)
+            return
+
+        if key == "Esc":
             self.stop_hotkey_capture(restore_original=True)
             self.set_status("단축키 입력을 취소했습니다.")
-            return "break"
-        if event.keysym in {"BackSpace", "Delete"}:
+            return
+        if key in {"Backspace", "Delete"}:
             self.hotkey_capture_var.set("")
             self.stop_hotkey_capture()
             self.set_status("단축키를 비웠습니다.")
-            return "break"
-
-        key = self._hotkey_key_name(event.keysym)
-        if not key:
-            return "break"
-
-        if key in {"Ctrl", "Alt", "Shift", "Win"}:
+            return
+        if key in MODIFIER_KEY_NAMES:
             self.hotkey_capture_modifiers.add(key)
-            return "break"
+            return
 
-        modifiers = self._event_modifiers(event)
+        modifiers = self._event_modifiers(None)
         if not modifiers:
             self.set_status("Ctrl, Alt, Shift, Win 중 하나 이상과 같이 누르세요.")
-            return "break"
+            return
 
         hotkey = "+".join([*modifiers, key])
         self.hotkey_capture_var.set(hotkey)
         self.stop_hotkey_capture()
         self.set_status(f"단축키를 {hotkey}로 입력했습니다.")
+
+    def _capture_hotkey_event(self, event) -> str:
+        if self.hotkey_capture_var is None:
+            return "break"
+        key = self._hotkey_key_name(event.keysym)
+        if key:
+            self._handle_hotkey_capture_key(key, True)
         return "break"
 
     def _release_hotkey_modifier(self, event) -> str:
         key = self._hotkey_key_name(event.keysym)
+        if key:
+            self._handle_hotkey_capture_key(key, False)
+            return "break"
         if key in {"Ctrl", "Alt", "Shift", "Win"}:
             self.hotkey_capture_modifiers.discard(key)
         return "break"
