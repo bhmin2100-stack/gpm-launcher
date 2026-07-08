@@ -5,12 +5,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+import traceback
 from tkinter import messagebox, ttk
 from urllib.parse import parse_qs, unquote, urlparse
 import winreg
@@ -21,6 +23,7 @@ APP_REG_NAME = "GPMLauncher"
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "GPM Launcher"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 WINDOW_CACHE_PATH = CONFIG_DIR / "window-cache.json"
+LOG_PATH = CONFIG_DIR / "gpm-launcher.log"
 LEGACY_CONFIG_PATH = Path(__file__).resolve().parent / "gpm-launcher.config.json"
 HOTKEY_BASE_ID = 0x4700
 OI_HOTKEY_BASE_ID = 0x4800
@@ -257,6 +260,16 @@ def resource_base_dir() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS)  # type: ignore[attr-defined]
     return app_base_dir()
+
+
+def log_runtime_error(context: str) -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a", encoding="utf-8") as log:
+            log.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {context}\n")
+            log.write(traceback.format_exc())
+    except Exception:
+        pass
 
 
 def default_config() -> dict:
@@ -1332,6 +1345,9 @@ class TrayIcon:
         self.visible = False
         self.old_wndproc: int | None = None
         self.last_left_tray_event_at = 0.0
+        self.event_queue = queue.SimpleQueue()
+        self.poll_after_id: str | None = None
+        self.destroyed = False
         self._wndproc = WNDPROC(self._handle_message)
 
     def show(self) -> bool:
@@ -1351,6 +1367,7 @@ class TrayIcon:
             return False
 
         self.visible = True
+        self._start_event_pump()
         return True
 
     def hide(self) -> None:
@@ -1363,6 +1380,13 @@ class TrayIcon:
             self.hicon = None
 
     def destroy(self) -> None:
+        self.destroyed = True
+        if self.poll_after_id:
+            try:
+                self.root.after_cancel(self.poll_after_id)
+            except tk.TclError:
+                pass
+            self.poll_after_id = None
         self.hide()
         if self.old_wndproc:
             SetWindowLongPtrW(self.hwnd, GWL_WNDPROC, self.old_wndproc)
@@ -1399,18 +1423,52 @@ class TrayIcon:
         return data
 
     def _handle_message(self, hwnd, message, wparam, lparam):
-        if message == WM_TRAYICON:
-            event = int(lparam) & 0xFFFF
-            if event in (WM_LBUTTONUP, WM_LBUTTONDBLCLK, NIN_SELECT, NIN_KEYSELECT):
-                self.last_left_tray_event_at = time.monotonic()
-                self.root.after(0, self.on_show)
-            elif event == WM_RBUTTONUP:
-                self._show_menu()
-            return 0
+        try:
+            if message == WM_TRAYICON:
+                event = int(lparam) & 0xFFFF
+                if event in (WM_LBUTTONUP, WM_LBUTTONDBLCLK, NIN_SELECT, NIN_KEYSELECT):
+                    self.last_left_tray_event_at = time.monotonic()
+                    self._queue_action("show")
+                elif event == WM_RBUTTONUP:
+                    self._show_menu()
+                return 0
 
-        if self.old_wndproc:
-            return user32.CallWindowProcW(self.old_wndproc, hwnd, message, wparam, lparam)
+            if self.old_wndproc:
+                return user32.CallWindowProcW(self.old_wndproc, hwnd, message, wparam, lparam)
+        except Exception:
+            log_runtime_error("tray window message failed")
+            return 0
         return 0
+
+    def _queue_action(self, action: str) -> None:
+        self.event_queue.put(action)
+
+    def _start_event_pump(self) -> None:
+        if self.destroyed or self.poll_after_id:
+            return
+        try:
+            self.poll_after_id = self.root.after(100, self._drain_event_queue)
+        except tk.TclError:
+            self.poll_after_id = None
+
+    def _drain_event_queue(self) -> None:
+        self.poll_after_id = None
+        try:
+            while True:
+                try:
+                    action = self.event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    if action == "show":
+                        self.on_show()
+                    elif action == "exit":
+                        self.on_exit()
+                except Exception:
+                    log_runtime_error(f"tray action failed: {action}")
+        finally:
+            if self.visible and not self.destroyed:
+                self._start_event_pump()
 
     def _show_menu(self) -> None:
         point = POINT()
@@ -1427,12 +1485,12 @@ class TrayIcon:
             flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY
             command_id = user32.TrackPopupMenu(menu, flags, point.x, point.y, 0, self.hwnd, None)
             if command_id == ID_TRAY_SHOW:
-                self.root.after(0, self.on_show)
+                self._queue_action("show")
             elif command_id == ID_TRAY_EXIT:
                 if time.monotonic() - self.last_left_tray_event_at < 1.0:
-                    self.root.after(0, self.on_show)
+                    self._queue_action("show")
                 else:
-                    self.root.after(0, self.on_exit)
+                    self._queue_action("exit")
             user32.PostMessageW(self.hwnd, WM_NULL, 0, 0)
         finally:
             user32.DestroyMenu(menu)
