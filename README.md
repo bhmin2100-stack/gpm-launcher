@@ -22,13 +22,14 @@ Windows launcher for the company GPM Curl applications.
 
 ## Download
 
-The packaged Windows build is in:
+The packaged Windows builds are in:
 
 ```text
+release/GPMLauncher.exe
 release/GPMLauncher-windows.zip
 ```
 
-Extract the ZIP and run:
+For the ZIP build, extract the ZIP and run:
 
 ```text
 GPMLauncher.exe
