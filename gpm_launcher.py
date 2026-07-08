@@ -31,8 +31,12 @@ WM_NULL = 0x0000
 WM_QUIT = 0x0012
 WM_APP = 0x8000
 WM_TRAYICON = WM_APP + 1
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
+NIN_SELECT = 0x0400
+NIN_KEYSELECT = 0x0401
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
@@ -90,9 +94,10 @@ LR_LOADFROMFILE = 0x00000010
 LR_DEFAULTSIZE = 0x00000040
 MF_STRING = 0x00000000
 TPM_RIGHTBUTTON = 0x00000002
+TPM_NONOTIFY = 0x00000080
 TPM_RETURNCMD = 0x00000100
-ID_TRAY_SHOW = 1001
-ID_TRAY_EXIT = 1002
+ID_TRAY_SHOW = 0x7101
+ID_TRAY_EXIT = 0x7102
 MODIFIER_KEY_NAMES = {"Ctrl", "Alt", "Shift", "Win"}
 
 ENVIRONMENTS = [
@@ -1326,6 +1331,7 @@ class TrayIcon:
         self.hicon: int | None = None
         self.visible = False
         self.old_wndproc: int | None = None
+        self.last_left_tray_event_at = 0.0
         self._wndproc = WNDPROC(self._handle_message)
 
     def show(self) -> bool:
@@ -1394,8 +1400,9 @@ class TrayIcon:
 
     def _handle_message(self, hwnd, message, wparam, lparam):
         if message == WM_TRAYICON:
-            event = int(lparam)
-            if event == WM_LBUTTONDBLCLK:
+            event = int(lparam) & 0xFFFF
+            if event in (WM_LBUTTONUP, WM_LBUTTONDBLCLK, NIN_SELECT, NIN_KEYSELECT):
+                self.last_left_tray_event_at = time.monotonic()
                 self.root.after(0, self.on_show)
             elif event == WM_RBUTTONUP:
                 self._show_menu()
@@ -1417,11 +1424,15 @@ class TrayIcon:
             user32.AppendMenuW(menu, MF_STRING, ID_TRAY_SHOW, "열기")
             user32.AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, "종료")
             user32.SetForegroundWindow(self.hwnd)
-            command_id = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, point.x, point.y, 0, self.hwnd, None)
+            flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY
+            command_id = user32.TrackPopupMenu(menu, flags, point.x, point.y, 0, self.hwnd, None)
             if command_id == ID_TRAY_SHOW:
                 self.root.after(0, self.on_show)
             elif command_id == ID_TRAY_EXIT:
-                self.root.after(0, self.on_exit)
+                if time.monotonic() - self.last_left_tray_event_at < 1.0:
+                    self.root.after(0, self.on_show)
+                else:
+                    self.root.after(0, self.on_exit)
             user32.PostMessageW(self.hwnd, WM_NULL, 0, 0)
         finally:
             user32.DestroyMenu(menu)
