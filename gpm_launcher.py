@@ -18,7 +18,6 @@ import winreg
 
 APP_NAME = "GPM Launcher"
 APP_REG_NAME = "GPMLauncher"
-APP_USER_MODEL_PREFIX = "GPMLauncher"
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "GPM Launcher"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 WINDOW_CACHE_PATH = CONFIG_DIR / "window-cache.json"
@@ -972,107 +971,7 @@ def launch_command_for_gpm(index: int) -> tuple[str, str, str]:
     return pythonw_path(), f'"{Path(__file__).resolve()}" --launch {launch_arg}', str(app_base_dir())
 
 
-def shortcut_app_identity_script() -> str:
-    return r"""
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-
-[ComImport]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-[Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
-public interface IPropertyStore
-{
-    void GetCount(out uint cProps);
-    void GetAt(uint iProp, out PROPERTYKEY pkey);
-    void GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
-    void SetValue(ref PROPERTYKEY key, ref PROPVARIANT pv);
-    void Commit();
-}
-
-[StructLayout(LayoutKind.Sequential, Pack = 4)]
-public struct PROPERTYKEY
-{
-    public Guid fmtid;
-    public uint pid;
-
-    public PROPERTYKEY(Guid fmtid, uint pid)
-    {
-        this.fmtid = fmtid;
-        this.pid = pid;
-    }
-}
-
-[StructLayout(LayoutKind.Explicit, Size = 16)]
-public struct PROPVARIANT
-{
-    [FieldOffset(0)]
-    public ushort vt;
-
-    [FieldOffset(8)]
-    public IntPtr pointerValue;
-}
-
-public static class ShortcutAppIdentity
-{
-    private const ushort VT_LPWSTR = 31;
-    private static readonly Guid AppUserModelFmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
-    private static readonly PROPERTYKEY AppUserModelId = new PROPERTYKEY(AppUserModelFmtid, 5);
-    private static readonly Guid PropertyStoreGuid = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
-    private const uint GPS_READWRITE = 0x00000002;
-
-    [DllImport("Ole32.dll")]
-    private static extern int PropVariantClear(ref PROPVARIANT pvar);
-
-    [DllImport("Shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
-    private static extern int SHGetPropertyStoreFromParsingName(
-        [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
-        IntPtr pbc,
-        uint flags,
-        ref Guid riid,
-        out IntPtr ppv);
-
-    public static void SetAppUserModelId(string shortcutPath, string appUserModelId)
-    {
-        Guid propertyStoreGuid = PropertyStoreGuid;
-        IntPtr propertyStorePointer = IntPtr.Zero;
-        int result = SHGetPropertyStoreFromParsingName(shortcutPath, IntPtr.Zero, GPS_READWRITE, ref propertyStoreGuid, out propertyStorePointer);
-        Marshal.ThrowExceptionForHR(result);
-        IPropertyStore propertyStore = (IPropertyStore)Marshal.GetObjectForIUnknown(propertyStorePointer);
-        PROPVARIANT value = StringPropVariant(appUserModelId);
-        PROPERTYKEY appUserModelIdKey = AppUserModelId;
-        try
-        {
-            propertyStore.SetValue(ref appUserModelIdKey, ref value);
-            propertyStore.Commit();
-        }
-        finally
-        {
-            PropVariantClear(ref value);
-            if (propertyStorePointer != IntPtr.Zero)
-            {
-                Marshal.Release(propertyStorePointer);
-            }
-            if (propertyStore != null)
-            {
-                Marshal.ReleaseComObject(propertyStore);
-            }
-        }
-    }
-
-    private static PROPVARIANT StringPropVariant(string value)
-    {
-        PROPVARIANT propVariant = new PROPVARIANT();
-        propVariant.vt = VT_LPWSTR;
-        propVariant.pointerValue = Marshal.StringToCoTaskMemUni(value);
-        return propVariant;
-    }
-}
-"@
-"""
-
-
-def create_shortcut(shortcut_path: Path, target: str, arguments: str, working_dir: str, icon: str, app_user_model_id: str | None = None) -> None:
+def create_shortcut(shortcut_path: Path, target: str, arguments: str, working_dir: str, icon: str) -> None:
     lines = [
         "$shell = New-Object -ComObject WScript.Shell",
         f"$shortcut = $shell.CreateShortcut({ps_quote(str(shortcut_path))})",
@@ -1082,13 +981,6 @@ def create_shortcut(shortcut_path: Path, target: str, arguments: str, working_di
         f"$shortcut.IconLocation = {ps_quote(icon)}",
         "$shortcut.Save()",
     ]
-    if app_user_model_id:
-        lines.extend(
-            [
-                shortcut_app_identity_script(),
-                f"[ShortcutAppIdentity]::SetAppUserModelId({ps_quote(str(shortcut_path))}, {ps_quote(app_user_model_id)})",
-            ]
-        )
     script = "\n".join(lines)
     subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
@@ -1111,19 +1003,6 @@ def web_shortcut_path(kind: str, entry: dict, index: int) -> Path:
     shortcuts_dir.mkdir(parents=True, exist_ok=True)
     name = safe_name(entry.get("name", ""), f"{kind_display_name(kind)} {index + 1}")
     return shortcuts_dir / f"{name} {kind_display_name(kind)}.lnk"
-
-
-def app_user_model_part(value: str, fallback: str) -> str:
-    text = re.sub(r"[^A-Za-z0-9]+", ".", value or "").strip(".")
-    return text[:40] or fallback
-
-
-def web_entry_app_user_model_id(kind: str, entry: dict, index: int) -> str:
-    label = kind_display_name(kind)
-    name = safe_name(entry.get("name", ""), f"{label} {index + 1}")
-    digest = hashlib.sha1(f"{kind}|{name}|{normalized_entry_url(kind, entry)}".encode("utf-8", errors="ignore")).hexdigest()[:12]
-    name_part = app_user_model_part(name, f"{kind}{index + 1}")
-    return f"{APP_USER_MODEL_PREFIX}.{kind}.{name_part}.{digest}"
 
 
 def create_web_app_shortcut(kind: str, entry: dict, index: int, config: dict, desktop: bool = False) -> Path:
@@ -1157,7 +1036,6 @@ def create_web_app_shortcut(kind: str, entry: dict, index: int, config: dict, de
         args,
         str(app_base_dir()),
         generated_icon_location(kind, entry),
-        app_user_model_id=web_entry_app_user_model_id(kind, entry, index),
     )
     return shortcut
 
