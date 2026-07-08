@@ -651,7 +651,7 @@ def title_matches_entry(title: str, entry: dict, kind: str, index: int) -> bool:
     if kind == "oi":
         return oi_title_matches_entry(lowered, name)
     if kind == "agreement":
-        return bool(name and len(name) >= 2 and name in lowered and title_has_agreement_marker(lowered) and not title_has_gpm_marker(lowered) and not title_has_oi_marker(lowered))
+        return agreement_title_matches_entry(lowered, name)
     if kind == "gpm":
         return gpm_title_matches_entry(lowered, name)
     return False
@@ -677,6 +677,18 @@ def oi_title_matches_entry(lowered_title: str, lowered_name: str) -> bool:
     return lowered_name in lowered_title and title_has_oi_marker(lowered_title)
 
 
+def agreement_title_matches_entry(lowered_title: str, lowered_name: str) -> bool:
+    if not lowered_name or len(lowered_name) < 2:
+        return False
+    if title_has_gpm_marker(lowered_title) or title_has_oi_marker(lowered_title):
+        return False
+    if is_nrdk_entry_name(lowered_name):
+        return title_has_nrdk_agreement_marker(lowered_title) or lowered_name in lowered_title
+    if is_nrd_entry_name(lowered_name) and title_has_nrdk_agreement_marker(lowered_title):
+        return False
+    return lowered_name in lowered_title
+
+
 def is_nrd_entry_name(lowered_name: str) -> bool:
     return bool(re.search(r"\bnrd\b", lowered_name))
 
@@ -691,6 +703,10 @@ def title_has_nrdk_runtime_marker(lowered_title: str) -> bool:
 
 def title_has_nrdk_oi_runtime_marker(lowered_title: str) -> bool:
     return bool(re.search(r"\bnrd[._ -]*k1\b", lowered_title))
+
+
+def title_has_nrdk_agreement_marker(lowered_title: str) -> bool:
+    return bool(re.search(r"\bnrd[._ -]*k\b|\bnrdk\b|\bnrd[._ -]*k1\b|\bnext[._ -]*nrd\b", lowered_title))
 
 
 def title_has_gpm_marker(title: str) -> bool:
